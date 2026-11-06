@@ -2,6 +2,9 @@ import io
 import math
 import os
 import re
+import openpyxl
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.utils import get_column_letter
 import pandas as pd
 import streamlit as st
 
@@ -143,7 +146,6 @@ def obogatit_dannymi_dostupnosti(osnovnaya_tablica, fayl_bayty):
 def sozdat_shablon_plana(df_baza):
     shablon_spisok = []
 
-    # 1. Заполняем текущую матрицу
     for _, r in df_baza.iterrows():
         shablon_spisok.append(
             {
@@ -157,7 +159,6 @@ def sozdat_shablon_plana(df_baza):
             }
         )
 
-    # 2. Добавляем примеры строк для новых поставщиков и новинок
     shablon_spisok.append(
         {
             "Поставщик / Производитель": "НОВЫЙ ПОСТАВЩИК (ПРИМЕР)",
@@ -174,14 +175,55 @@ def sozdat_shablon_plana(df_baza):
     baffer = io.BytesIO()
     with pd.ExcelWriter(baffer, engine="openpyxl") as pisatel:
         df_shablon.to_excel(pisatel, index=False, sheet_name="План продаж")
+        ws = pisatel.sheets["План продаж"]
+
+        granica_tonkaya = Border(
+            left=Side(style="thin", color="CCCCCC"),
+            right=Side(style="thin", color="CCCCCC"),
+            top=Side(style="thin", color="CCCCCC"),
+            bottom=Side(style="thin", color="CCCCCC"),
+        )
+        zalivka_shapki = PatternFill(
+            start_color="3B4252", end_color="3B4252", fill_type="solid"
+        )
+        shrift_shapki = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
+
+        for stolbec_idx in range(1, len(df_shablon.columns) + 1):
+            yacheyka = ws.cell(row=1, column=stolbec_idx)
+            yacheyka.fill = zalivka_shapki
+            yacheyka.font = shrift_shapki
+            yacheyka.alignment = Alignment(
+                horizontal="center", vertical="center", wrap_text=True
+            )
+
+        ws.row_dimensions[1].height = 28
+
+        for row_idx in range(2, len(df_shablon) + 2):
+            ws.row_dimensions[row_idx].height = 20
+            for col_idx in range(1, len(df_shablon.columns) + 1):
+                c = ws.cell(row=row_idx, column=col_idx)
+                c.border = granica_tonkaya
+                if col_idx in [4, 6]:
+                    c.alignment = Alignment(horizontal="center", vertical="center")
+                elif col_idx == 5:
+                    c.alignment = Alignment(horizontal="right", vertical="center")
+                    c.number_format = "#,##0.00"
+                else:
+                    c.alignment = Alignment(horizontal="left", vertical="center")
+
+        for col in ws.columns:
+            dlina = max(len(str(cell.value or "")) for cell in col)
+            bukva = get_column_letter(col[0].column)
+            ws.column_dimensions[bukva].width = max(min(dlina + 4, 65), 12)
+
+        ws.freeze_panes = "D2"
+
     return baffer.getvalue()
 
 
 # --- 4. ОБЪЕДИНЕНИЕ БАЗЫ С ПЛАНОМ ПРОДАЖ МЕНЕДЖЕРОВ ---
 def primenit_plan_prodazh(osnovnaya_tablica, fayl_plana):
     df_plan = pd.read_excel(fayl_plana)
-
-    # Поиск нужных колонок вне зависимости от мелких различий в регистре
     kolonki = {str(c).strip().lower(): c for c in df_plan.columns}
 
     k_postavschik = next(
@@ -219,7 +261,6 @@ def primenit_plan_prodazh(osnovnaya_tablica, fayl_plana):
         if artikul_str in suschestvuyuschie_artikuly and artikul_str != "":
             plany_po_artikulam[artikul_str] = int(plan_obem)
         else:
-            # Это новая позиция или новый поставщик
             naim = (
                 str(stroka[k_naimenovanie]).strip()
                 if k_naimenovanie and pd.notna(stroka[k_naimenovanie])
@@ -266,7 +307,6 @@ def primenit_plan_prodazh(osnovnaya_tablica, fayl_plana):
                     }
                 )
 
-    # Обновляем план в основной таблице
     osnovnaya_tablica["План продаж на месяц (бут)"] = (
         osnovnaya_tablica["Артикул"]
         .map(plany_po_artikulam)
@@ -274,7 +314,6 @@ def primenit_plan_prodazh(osnovnaya_tablica, fayl_plana):
         .astype(int)
     )
 
-    # Если есть новинки — прикрепляем их
     if novye_pozicii:
         df_novinki = pd.DataFrame(novye_pozicii)
         osnovnaya_tablica = pd.concat(
@@ -284,7 +323,175 @@ def primenit_plan_prodazh(osnovnaya_tablica, fayl_plana):
     return osnovnaya_tablica
 
 
-# --- 5. ИНТЕРФЕЙС И НАСТРОЙКИ ---
+# --- 5. ФОРМАТИРОВАНИЕ EXCEL ПРИ ЭКСПОРТЕ С ГРАНИЦАМИ И ПОЛЯМИ ---
+def sformirovat_krasivyy_excel(tablica_vyvoda, stolbcy_dlya_pokaza):
+    baffer = io.BytesIO()
+    with pd.ExcelWriter(baffer, engine="openpyxl") as pisatel:
+        tablica_vyvoda[stolbcy_dlya_pokaza].to_excel(
+            pisatel, index=False, sheet_name="План закупок"
+        )
+        ws = pisatel.sheets["План закупок"]
+
+        # Настройки полей страницы для удобной печати
+        ws.page_setup.orientation = ws.ORIENTATION_LANDSCAPE
+        ws.page_setup.paperSize = ws.PAPERSIZE_A4
+        ws.sheet_properties.pageSetUpPr.fitToPage = True
+        ws.page_margins.left = 0.5
+        ws.page_margins.right = 0.5
+        ws.page_margins.top = 0.6
+        ws.page_margins.bottom = 0.6
+
+        # Стили границ
+        granica_tonkaya = Border(
+            left=Side(style="thin", color="D3D3D3"),
+            right=Side(style="thin", color="D3D3D3"),
+            top=Side(style="thin", color="D3D3D3"),
+            bottom=Side(style="thin", color="D3D3D3"),
+        )
+        granica_shapki = Border(
+            left=Side(style="thin", color="2C1820"),
+            right=Side(style="thin", color="2C1820"),
+            top=Side(style="medium", color="2C1820"),
+            bottom=Side(style="medium", color="2C1820"),
+        )
+
+        # Стили шапки
+        zalivka_shapki = PatternFill(
+            start_color="581825", end_color="581825", fill_type="solid"
+        )  # благородный темно-бордовый
+        shrift_shapki = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
+
+        ws.row_dimensions[1].height = 32
+
+        for col_idx in range(1, len(stolbcy_dlya_pokaza) + 1):
+            c = ws.cell(row=1, column=col_idx)
+            c.fill = zalivka_shapki
+            c.font = shrift_shapki
+            c.border = granica_shapki
+            c.alignment = Alignment(
+                horizontal="center", vertical="center", wrap_text=True
+            )
+
+        # Стили подсветки статусов
+        podsvetka_deficit = PatternFill(
+            start_color="FDE8E8", end_color="FDE8E8", fill_type="solid"
+        )
+        podsvetka_zakaz = PatternFill(
+            start_color="FEF08A", end_color="FEF08A", fill_type="solid"
+        )
+        podsvetka_izbytok = PatternFill(
+            start_color="E0E7FF", end_color="E0E7FF", fill_type="solid"
+        )
+        podsvetka_novinka = PatternFill(
+            start_color="DCFCE7", end_color="DCFCE7", fill_type="solid"
+        )
+
+        # Форматирование ячеек данных
+        for row_idx in range(2, len(tablica_vyvoda) + 2):
+            ws.row_dimensions[row_idx].height = 20
+            status_znachenie = str(
+                ws.cell(row=row_idx, column=3).value or ""
+            ).lower()
+
+            for col_idx, nazvanie_kolonki in enumerate(
+                stolbcy_dlya_pokaza, start=1
+            ):
+                cell = ws.cell(row=row_idx, column=col_idx)
+                cell.border = granica_tonkaya
+                cell.font = Font(name="Calibri", size=10)
+
+                # Подсветка статуса
+                if col_idx == 3:
+                    cell.alignment = Alignment(
+                        horizontal="center", vertical="center"
+                    )
+                    if "дефицит" in status_znachenie:
+                        cell.fill = podsvetka_deficit
+                        cell.font = Font(
+                            name="Calibri", size=10, bold=True, color="991B1B"
+                        )
+                    elif "заказывать" in status_znachenie:
+                        cell.fill = podsvetka_zakaz
+                        cell.font = Font(
+                            name="Calibri", size=10, bold=True, color="854D0E"
+                        )
+                    elif "избыточный" in status_znachenie:
+                        cell.fill = podsvetka_izbytok
+                        cell.font = Font(
+                            name="Calibri", size=10, bold=True, color="3730A3"
+                        )
+                    elif "новинка" in status_znachenie:
+                        cell.fill = podsvetka_novinka
+                        cell.font = Font(
+                            name="Calibri", size=10, bold=True, color="166534"
+                        )
+                    continue
+
+                # Форматы чисел и валюты
+                if nazvanie_kolonki in [
+                    "Себестоимость (руб)",
+                    "Бюджет закупки (руб)",
+                    "Заморожено в избытке (руб)",
+                ]:
+                    cell.number_format = "#,##0.00 ₽"
+                    cell.alignment = Alignment(
+                        horizontal="right", vertical="center"
+                    )
+                elif nazvanie_kolonki in [
+                    "Расчетный спрос в день (бут)",
+                    "Среднесуточный расход (бут/день)",
+                    "Обеспеченность (дней)",
+                    "К заказу (паллет)",
+                ]:
+                    cell.number_format = "#,##0.0"
+                    cell.alignment = Alignment(
+                        horizontal="right", vertical="center"
+                    )
+                elif nazvanie_kolonki in [
+                    "План продаж на месяц (бут)",
+                    "Остаток на складе (бут)",
+                    "Товары в пути (бут)",
+                    "Кратность (бут)",
+                    "К заказу (бут)",
+                    "К заказу (кор)",
+                    "Избыток (бут)",
+                ]:
+                    cell.number_format = "#,##0"
+                    cell.alignment = Alignment(
+                        horizontal="right", vertical="center"
+                    )
+                elif nazvanie_kolonki == "Поставщик":
+                    cell.alignment = Alignment(
+                        horizontal="left", vertical="center"
+                    )
+                elif nazvanie_kolonki == "Наименование":
+                    cell.alignment = Alignment(
+                        horizontal="left", vertical="center"
+                    )
+                else:
+                    cell.alignment = Alignment(
+                        horizontal="center", vertical="center"
+                    )
+
+        # Автоматическая ширина колонок с разумными границами
+        for col in ws.columns:
+            dlina = max(len(str(cell.value or "")) for cell in col)
+            bukva = get_column_letter(col[0].column)
+            # Для наименования даем достаточно места, чтобы помещался сорт и линейка
+            if col[0].value == "Наименование":
+                ws.column_dimensions[bukva].width = 52
+            elif col[0].value == "Поставщик":
+                ws.column_dimensions[bukva].width = 28
+            else:
+                ws.column_dimensions[bukva].width = max(min(dlina + 4, 30), 13)
+
+        # Закрепляем шапку и первые две колонки (Поставщик и Наименование)
+        ws.freeze_panes = "C2"
+
+    return baffer.getvalue()
+
+
+# --- 6. ИНТЕРФЕЙС И НАСТРОЙКИ ---
 st.title("🍷 Дашборд управления запасами и планирования продаж")
 st.caption(
     "Склад Курьяново | Учет планов менеджеров, новых клиентов и паллетных норм"
@@ -383,7 +590,6 @@ try:
             tablica, fayl_dostupnosti_po_umolchaniyu
         )
 
-    # Применение плана продаж, если он загружен
     if zagruzhennyy_plan is not None:
         tablica = primenit_plan_prodazh(tablica, zagruzhennyy_plan)
 
@@ -391,7 +597,7 @@ except Exception as oshibka:
     st.error(f"Ошибка при обработке файлов: {oshibka}")
     st.stop()
 
-# --- 6. ПЕРЕСЧЕТ СРЕДНЕСУТОЧНОГО СПРОСА С УЧЕТОМ ПЛАНА ---
+# --- 7. ПЕРЕСЧЕТ СРЕДНЕСУТОЧНОГО СПРОСА С УЧЕТОМ ПЛАНА ---
 def opredelit_itogovyy_rashod(stroka):
     fakt_sutki = stroka["Среднесуточный расход (бут/день)"]
     plan_sutki = (
@@ -411,7 +617,7 @@ tablica["Расчетный спрос в день (бут)"] = tablica.apply(
     opredelit_itogovyy_rashod, axis=1
 ).round(3)
 
-# --- 7. РАСЧЕТ ОБОРАЧИВАЕМОСТИ И ПОТРЕБНОСТИ В ЗАКУПКЕ ---
+# --- 8. РАСЧЕТ ОБОРАЧИВАЕМОСТИ И ПОТРЕБНОСТИ В ЗАКУПКЕ ---
 tablica["Всего доступно (бут)"] = (
     tablica["Остаток на складе (бут)"] + tablica["Товары в пути (бут)"]
 )
@@ -438,7 +644,7 @@ tablica["Целевой запас (бут)"] = (
 ).round(0)
 
 
-# Расчет объема закупки с учетом квантов (короба, паллеты, мин. заказ)
+# Расчет объема закупки с учетом квантов
 def rasschitat_zakaz_kvanty(stroka):
     chistaya_potrebnost = (
         stroka["Целевой запас (бут)"]
@@ -528,13 +734,15 @@ if poisk_tekst:
         )
     ]
 
-# --- 8. БЛОК ВЫГРУЗКИ ШАБЛОНА ДЛЯ МЕНЕДЖЕРОВ ---
+# --- 9. БЛОК ВЫГРУЗКИ ШАБЛОНА ДЛЯ МЕНЕДЖЕРОВ ---
 with st.expander("📥 Скачать форму-шаблон для заполнения плана менеджерами", expanded=False):
     st.write(
-        "Файл содержит полную матрицу действующих позиций склада, а также строки-примеры для внесения "
-        "новых виноделен, линеек и прогнозов продаж под расширение клиентской базы."
+        "Файл оформлен с полями и границами, содержит полную матрицу склада и "
+        "строки-примеры для внесения новых виноделен и линеек."
     )
-    dannie_shablona = sozdat_shablon_plana(tablica[tablica["Тип позиции"] == "Действующая матрица"])
+    dannie_shablona = sozdat_shablon_plana(
+        tablica[tablica["Тип позиции"] == "Действующая матрица"]
+    )
     st.download_button(
         label="📥 Скачать Excel-шаблон плана продаж",
         data=dannie_shablona,
@@ -542,7 +750,7 @@ with st.expander("📥 Скачать форму-шаблон для запол�
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
-# --- 9. КЛЮЧЕВЫЕ ПОКАЗАТЕЛИ (KPI) ---
+# --- 10. КЛЮЧЕВЫЕ ПОКАЗАТЕЛИ (KPI) ---
 m1, m2, m3, m4, m5 = st.columns(5)
 m1.metric(
     "Остаток на складе (бут)",
@@ -580,7 +788,7 @@ m5.metric(
 
 st.markdown("---")
 
-# --- 10. ПЕРЕКЛЮЧАТЕЛЬ РЕЖИМА И СОРТИРОВКА ТАБЛИЦЫ ---
+# --- 11. ПЕРЕКЛЮЧАТЕЛЬ РЕЖИМА И СОРТИРОВКА ТАБЛИЦЫ ---
 kolonka_perekl, kolonka_sort = st.columns([2, 2])
 
 with kolonka_perekl:
@@ -608,7 +816,7 @@ with kolonka_sort:
     else:
         sortirovka_prozicit = None
 
-# Применение выбранного режима и сортировки
+# Применение режима и сортировки
 if rezhim_otobrazheniya == "⚠️ Только дефицит и закупка":
     tablica_vyvoda = otfiltrovannaya_tablica[
         otfiltrovannaya_tablica["К заказу (бут)"] > 0
@@ -679,16 +887,14 @@ st.dataframe(
     use_container_width=True,
 )
 
-# --- 11. ВЫГРУЗКА В EXCEL ---
-baffer_eksporta = io.BytesIO()
-with pd.ExcelWriter(baffer_eksporta, engine="openpyxl") as pisatel:
-    tablica_vyvoda[stolbcy_dlya_pokaza].to_excel(
-        pisatel, index=False, sheet_name="План закупок"
-    )
+# --- 12. ВЫГРУЗКА В СТИЛИЗОВАННЫЙ EXCEL С ГРАНИЦАМИ И ПОЛЯМИ ---
+fayl_eksporta_bayty = sformirovat_krasivyy_excel(
+    tablica_vyvoda, stolbcy_dlya_pokaza
+)
 
 st.download_button(
-    label="📥 Экспортировать план закупок в Excel",
-    data=baffer_eksporta.getvalue(),
+    label="📥 Экспортировать план закупок в Excel (с границами и полями)",
+    data=fayl_eksporta_bayty,
     file_name="План_закупок_с_учетом_плана_продаж.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 )
