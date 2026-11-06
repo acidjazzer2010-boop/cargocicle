@@ -142,7 +142,7 @@ def obogatit_dannymi_dostupnosti(osnovnaya_tablica, fayl_bayty):
     return osnovnaya_tablica
 
 
-# --- 3. ГЕНЕРАТОР ШАБЛОНА ПЛАНА ПРОДАЖ ДЛЯ МЕНЕДЖЕРОВ ---
+# --- 3. ГЕНЕРАТОР СОКРАЩЕННОГО ШАБЛОНА ПЛАНА ДЛЯ МЕНЕДЖЕРОВ (6 КОЛОНОК С ФОРМУЛОЙ) ---
 def sozdat_shablon_plana(df_baza):
     shablon_spisok = []
 
@@ -150,32 +150,42 @@ def sozdat_shablon_plana(df_baza):
         shablon_spisok.append(
             {
                 "Поставщик / Производитель": r["Поставщик"],
-                "Артикул": r["Артикул"],
                 "Наименование продукции": r["Наименование"],
-                "Кратность короба (бут)": r["Кратность (бут)"],
-                "Ориентировочная себестоимость (руб)": r["Себестоимость (руб)"],
-                "План продаж на месяц (бут)": 0,
-                "Комментарий менеджера (клиенты/сеть)": "",
+                "Текущий остаток (бут)": int(r["Остаток на складе (бут)"]),
+                "Себестоимость (руб)": float(r["Себестоимость (руб)"]),
+                "План продаж (бут)": 0,
             }
         )
 
+    # Строка-пример для новинки
     shablon_spisok.append(
         {
             "Поставщик / Производитель": "НОВЫЙ ПОСТАВЩИК (ПРИМЕР)",
-            "Артикул": "НОВИНКА-001",
             "Наименование продукции": "Новое вино сухое белое 0.75: 6",
-            "Кратность короба (бут)": 6,
-            "Ориентировочная себестоимость (руб)": 350.0,
-            "План продаж на месяц (бут)": 600,
-            "Комментарий менеджера (клиенты/сеть)": "Ввод под новую локальную сеть",
+            "Текущий остаток (бут)": 0,
+            "Себестоимость (руб)": 350.0,
+            "План продаж (бут)": 600,
         }
     )
 
     df_shablon = pd.DataFrame(shablon_spisok)
     baffer = io.BytesIO()
+
     with pd.ExcelWriter(baffer, engine="openpyxl") as pisatel:
         df_shablon.to_excel(pisatel, index=False, sheet_name="План продаж")
         ws = pisatel.sheets["План продаж"]
+
+        # Настройки страницы для печати
+        ws.page_setup.orientation = ws.ORIENTATION_LANDSCAPE
+        ws.page_setup.paperSize = ws.PAPERSIZE_A4
+        ws.sheet_properties.pageSetUpPr.fitToPage = True
+        ws.page_margins.left = 0.5
+        ws.page_margins.right = 0.5
+        ws.page_margins.top = 0.6
+        ws.page_margins.bottom = 0.6
+
+        # Добавляем 6-ю колонку: "План продаж (руб)"
+        ws.cell(row=1, column=6, value="План продаж (руб)")
 
         granica_tonkaya = Border(
             left=Side(style="thin", color="CCCCCC"),
@@ -188,7 +198,8 @@ def sozdat_shablon_plana(df_baza):
         )
         shrift_shapki = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
 
-        for stolbec_idx in range(1, len(df_shablon.columns) + 1):
+        # Заливка шапки
+        for stolbec_idx in range(1, 7):
             yacheyka = ws.cell(row=1, column=stolbec_idx)
             yacheyka.fill = zalivka_shapki
             yacheyka.font = shrift_shapki
@@ -198,25 +209,61 @@ def sozdat_shablon_plana(df_baza):
 
         ws.row_dimensions[1].height = 28
 
+        # Оформление ячеек и проставление формулы в колонку F
+        zalivka_plana = PatternFill(
+            start_color="FFFBEB", end_color="FFFBEB", fill_type="solid"
+        )  # мягкий желтоватый фон для поля ввода менеджера
+
         for row_idx in range(2, len(df_shablon) + 2):
             ws.row_dimensions[row_idx].height = 20
-            for col_idx in range(1, len(df_shablon.columns) + 1):
-                c = ws.cell(row=row_idx, column=col_idx)
-                c.border = granica_tonkaya
-                if col_idx in [4, 6]:
-                    c.alignment = Alignment(horizontal="center", vertical="center")
-                elif col_idx == 5:
-                    c.alignment = Alignment(horizontal="right", vertical="center")
-                    c.number_format = "#,##0.00"
-                else:
-                    c.alignment = Alignment(horizontal="left", vertical="center")
 
-        for col in ws.columns:
-            dlina = max(len(str(cell.value or "")) for cell in col)
-            bukva = get_column_letter(col[0].column)
-            ws.column_dimensions[bukva].width = max(min(dlina + 4, 65), 12)
+            # Колонка A: Поставщик
+            cA = ws.cell(row=row_idx, column=1)
+            cA.border = granica_tonkaya
+            cA.alignment = Alignment(horizontal="left", vertical="center")
 
-        ws.freeze_panes = "D2"
+            # Колонка B: Наименование
+            cB = ws.cell(row=row_idx, column=2)
+            cB.border = granica_tonkaya
+            cB.alignment = Alignment(horizontal="left", vertical="center")
+
+            # Колонка C: Текущий остаток
+            cC = ws.cell(row=row_idx, column=3)
+            cC.border = granica_tonkaya
+            cC.number_format = "#,##0"
+            cC.alignment = Alignment(horizontal="right", vertical="center")
+
+            # Колонка D: Себестоимость (руб)
+            cD = ws.cell(row=row_idx, column=4)
+            cD.border = granica_tonkaya
+            cD.number_format = "#,##0.00 ₽"
+            cD.alignment = Alignment(horizontal="right", vertical="center")
+
+            # Колонка E: План продаж (бут) - поле для редактирования менеджером
+            cE = ws.cell(row=row_idx, column=5)
+            cE.border = granica_tonkaya
+            cE.fill = zalivka_plana
+            cE.number_format = "#,##0"
+            cE.font = Font(name="Calibri", size=11, bold=True)
+            cE.alignment = Alignment(horizontal="right", vertical="center")
+
+            # Колонка F: План продаж (руб) - Формула =D{row}*E{row}
+            cF = ws.cell(row=row_idx, column=6)
+            cF.value = f"=D{row_idx}*E{row_idx}"
+            cF.border = granica_tonkaya
+            cF.number_format = "#,##0.00 ₽"
+            cF.alignment = Alignment(horizontal="right", vertical="center")
+
+        # Настройка ширины колонок
+        ws.column_dimensions["A"].width = 28
+        ws.column_dimensions["B"].width = 54
+        ws.column_dimensions["C"].width = 16
+        ws.column_dimensions["D"].width = 18
+        ws.column_dimensions["E"].width = 18
+        ws.column_dimensions["F"].width = 20
+
+        # Фиксируем шапку и колонку производителя/названия
+        ws.freeze_panes = "C2"
 
     return baffer.getvalue()
 
@@ -230,43 +277,41 @@ def primenit_plan_prodazh(osnovnaya_tablica, fayl_plana):
         (v for k, v in kolonki.items() if "поставщик" in k or "производ" in k),
         None,
     )
-    k_artikul = next((v for k, v in kolonki.items() if "артикул" in k), None)
     k_naimenovanie = next(
         (v for k, v in kolonki.items() if "наименов" in k or "продукт" in k),
         None,
     )
     k_plan = next(
-        (v for k, v in kolonki.items() if "план" in k or "продаж" in k), None
+        (v for k, v in kolonki.items() if "план" in k and "бут" in k or "план" in k),
+        None,
     )
     k_sebest = next(
         (v for k, v in kolonki.items() if "себестоим" in k or "цена" in k), None
     )
-    k_kratnost = next((v for k, v in kolonki.items() if "кратн" in k), None)
 
-    if not k_plan:
+    if not k_plan or not k_naimenovanie:
         return osnovnaya_tablica
 
-    plany_po_artikulam = {}
+    plany_po_imenam = {}
     novye_pozicii = []
-    suschestvuyuschie_artikuly = set(osnovnaya_tablica["Артикул"].astype(str))
+    suschestvuyuschie_naimenovaniya = set(
+        osnovnaya_tablica["Наименование"].astype(str).str.strip().str.lower()
+    )
 
     for _, stroka in df_plan.iterrows():
-        artikul_str = str(stroka[k_artikul]).strip() if k_artikul else ""
-        plan_obem = (
-            float(stroka[k_plan])
-            if pd.notna(stroka[k_plan]) and str(stroka[k_plan]).strip() != ""
-            else 0.0
-        )
+        naim_str = str(stroka[k_naimenovanie]).strip() if pd.notna(stroka[k_naimenovanie]) else ""
+        if not naim_str or naim_str.lower() == "nan":
+            continue
 
-        if artikul_str in suschestvuyuschie_artikuly and artikul_str != "":
-            plany_po_artikulam[artikul_str] = int(plan_obem)
+        try:
+            plan_obem = float(stroka[k_plan]) if pd.notna(stroka[k_plan]) else 0.0
+        except Exception:
+            plan_obem = 0.0
+
+        if naim_str.lower() in suschestvuyuschie_naimenovaniya:
+            plany_po_imenam[naim_str.lower()] = int(plan_obem)
         else:
-            naim = (
-                str(stroka[k_naimenovanie]).strip()
-                if k_naimenovanie and pd.notna(stroka[k_naimenovanie])
-                else "Новинка без названия"
-            )
-            if "ПРИМЕР" in naim.upper() and plan_obem == 0:
+            if "ПРИМЕР" in naim_str.upper() and plan_obem == 0:
                 continue
             if plan_obem > 0:
                 post = (
@@ -274,24 +319,23 @@ def primenit_plan_prodazh(osnovnaya_tablica, fayl_plana):
                     if k_postavschik and pd.notna(stroka[k_postavschik])
                     else "Новый поставщик"
                 )
-                kratn = (
-                    int(stroka[k_kratnost])
-                    if k_kratnost and pd.notna(stroka[k_kratnost])
-                    else 6
-                )
-                seb = (
-                    float(stroka[k_sebest])
-                    if k_sebest and pd.notna(stroka[k_sebest])
-                    else 300.0
-                )
+                try:
+                    seb = (
+                        float(stroka[k_sebest])
+                        if k_sebest and pd.notna(stroka[k_sebest])
+                        else 350.0
+                    )
+                except Exception:
+                    seb = 350.0
+
+                poisk_kratn = re.search(r":\s*(\d+)\s*,?", naim_str)
+                kratn = int(poisk_kratn.group(1)) if poisk_kratn else 6
 
                 novye_pozicii.append(
                     {
                         "Поставщик": post,
-                        "Артикул": artikul_str
-                        if artikul_str and artikul_str != "nan"
-                        else f"НОВ-{len(novye_pozicii)+1}",
-                        "Наименование": naim,
+                        "Артикул": f"НОВ-{len(novye_pozicii)+1}",
+                        "Наименование": naim_str,
                         "Кратность (бут)": kratn,
                         "Себестоимость (руб)": seb,
                         "Приход за период (бут)": 0,
@@ -307,12 +351,10 @@ def primenit_plan_prodazh(osnovnaya_tablica, fayl_plana):
                     }
                 )
 
-    osnovnaya_tablica["План продаж на месяц (бут)"] = (
-        osnovnaya_tablica["Артикул"]
-        .map(plany_po_artikulam)
-        .fillna(0)
-        .astype(int)
-    )
+    # Привязываем план к существующим позициям по нормализованному наименованию
+    osnovnaya_tablica["План продаж на месяц (бут)"] = osnovnaya_tablica[
+        "Наименование"
+    ].apply(lambda x: plany_po_imenam.get(str(x).strip().lower(), 0))
 
     if novye_pozicii:
         df_novinki = pd.DataFrame(novye_pozicii)
@@ -323,7 +365,7 @@ def primenit_plan_prodazh(osnovnaya_tablica, fayl_plana):
     return osnovnaya_tablica
 
 
-# --- 5. ФОРМАТИРОВАНИЕ EXCEL ПРИ ЭКСПОРТЕ С ГРАНИЦАМИ И ПОЛЯМИ ---
+# --- 5. ФОРМАТИРОВАНИЕ ИТОГОВОГО EXCEL ПЛАНА ЗАКУПОК ---
 def sformirovat_krasivyy_excel(tablica_vyvoda, stolbcy_dlya_pokaza):
     baffer = io.BytesIO()
     with pd.ExcelWriter(baffer, engine="openpyxl") as pisatel:
@@ -332,7 +374,6 @@ def sformirovat_krasivyy_excel(tablica_vyvoda, stolbcy_dlya_pokaza):
         )
         ws = pisatel.sheets["План закупок"]
 
-        # Настройки полей страницы для удобной печати
         ws.page_setup.orientation = ws.ORIENTATION_LANDSCAPE
         ws.page_setup.paperSize = ws.PAPERSIZE_A4
         ws.sheet_properties.pageSetUpPr.fitToPage = True
@@ -341,7 +382,6 @@ def sformirovat_krasivyy_excel(tablica_vyvoda, stolbcy_dlya_pokaza):
         ws.page_margins.top = 0.6
         ws.page_margins.bottom = 0.6
 
-        # Стили границ
         granica_tonkaya = Border(
             left=Side(style="thin", color="D3D3D3"),
             right=Side(style="thin", color="D3D3D3"),
@@ -355,10 +395,9 @@ def sformirovat_krasivyy_excel(tablica_vyvoda, stolbcy_dlya_pokaza):
             bottom=Side(style="medium", color="2C1820"),
         )
 
-        # Стили шапки
         zalivka_shapki = PatternFill(
             start_color="581825", end_color="581825", fill_type="solid"
-        )  # благородный темно-бордовый
+        )
         shrift_shapki = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
 
         ws.row_dimensions[1].height = 32
@@ -372,7 +411,6 @@ def sformirovat_krasivyy_excel(tablica_vyvoda, stolbcy_dlya_pokaza):
                 horizontal="center", vertical="center", wrap_text=True
             )
 
-        # Стили подсветки статусов
         podsvetka_deficit = PatternFill(
             start_color="FDE8E8", end_color="FDE8E8", fill_type="solid"
         )
@@ -386,7 +424,6 @@ def sformirovat_krasivyy_excel(tablica_vyvoda, stolbcy_dlya_pokaza):
             start_color="DCFCE7", end_color="DCFCE7", fill_type="solid"
         )
 
-        # Форматирование ячеек данных
         for row_idx in range(2, len(tablica_vyvoda) + 2):
             ws.row_dimensions[row_idx].height = 20
             status_znachenie = str(
@@ -400,7 +437,6 @@ def sformirovat_krasivyy_excel(tablica_vyvoda, stolbcy_dlya_pokaza):
                 cell.border = granica_tonkaya
                 cell.font = Font(name="Calibri", size=10)
 
-                # Подсветка статуса
                 if col_idx == 3:
                     cell.alignment = Alignment(
                         horizontal="center", vertical="center"
@@ -427,7 +463,6 @@ def sformirovat_krasivyy_excel(tablica_vyvoda, stolbcy_dlya_pokaza):
                         )
                     continue
 
-                # Форматы чисел и валюты
                 if nazvanie_kolonki in [
                     "Себестоимость (руб)",
                     "Бюджет закупки (руб)",
@@ -460,11 +495,7 @@ def sformirovat_krasivyy_excel(tablica_vyvoda, stolbcy_dlya_pokaza):
                     cell.alignment = Alignment(
                         horizontal="right", vertical="center"
                     )
-                elif nazvanie_kolonki == "Поставщик":
-                    cell.alignment = Alignment(
-                        horizontal="left", vertical="center"
-                    )
-                elif nazvanie_kolonki == "Наименование":
+                elif nazvanie_kolonki in ["Поставщик", "Наименование"]:
                     cell.alignment = Alignment(
                         horizontal="left", vertical="center"
                     )
@@ -473,11 +504,9 @@ def sformirovat_krasivyy_excel(tablica_vyvoda, stolbcy_dlya_pokaza):
                         horizontal="center", vertical="center"
                     )
 
-        # Автоматическая ширина колонок с разумными границами
         for col in ws.columns:
             dlina = max(len(str(cell.value or "")) for cell in col)
             bukva = get_column_letter(col[0].column)
-            # Для наименования даем достаточно места, чтобы помещался сорт и линейка
             if col[0].value == "Наименование":
                 ws.column_dimensions[bukva].width = 52
             elif col[0].value == "Поставщик":
@@ -485,7 +514,6 @@ def sformirovat_krasivyy_excel(tablica_vyvoda, stolbcy_dlya_pokaza):
             else:
                 ws.column_dimensions[bukva].width = max(min(dlina + 4, 30), 13)
 
-        # Закрепляем шапку и первые две колонки (Поставщик и Наименование)
         ws.freeze_panes = "C2"
 
     return baffer.getvalue()
@@ -508,7 +536,7 @@ with st.sidebar:
 
     st.header("📈 План продаж менеджеров")
     zagruzhennyy_plan = st.file_uploader(
-        "3. Загрузить план продаж на месяц", type=["xlsx"]
+        "3. Загрузить заполненный план продаж", type=["xlsx"]
     )
 
     metod_prognoza = st.radio(
@@ -622,7 +650,6 @@ tablica["Всего доступно (бут)"] = (
     tablica["Остаток на складе (бут)"] + tablica["Товары в пути (бут)"]
 )
 
-# Обеспеченность склада (дней)
 tablica["Обеспеченность (дней)"] = tablica.apply(
     lambda r: round(
         r["Всего доступно (бут)"] / r["Расчетный спрос в день (бут)"], 1
@@ -632,7 +659,6 @@ tablica["Обеспеченность (дней)"] = tablica.apply(
     axis=1,
 )
 
-# Точка перезаказа и нормативный целевой запас
 tablica["Точка перезаказа (бут)"] = (
     tablica["Расчетный спрос в день (бут)"]
     * (srok_dostavki + strahovoy_zapas_dni)
@@ -644,7 +670,6 @@ tablica["Целевой запас (бут)"] = (
 ).round(0)
 
 
-# Расчет объема закупки с учетом квантов
 def rasschitat_zakaz_kvanty(stroka):
     chistaya_potrebnost = (
         stroka["Целевой запас (бут)"]
@@ -679,7 +704,6 @@ tablica["Бюджет закупки (руб)"] = (
 ).round(2)
 
 
-# Расчет избыточного запаса (профицита)
 def rasschitat_izbytok(stroka):
     izlishek = stroka["Всего доступно (бут)"] - stroka["Целевой запас (бут)"]
     return int(max(0, izlishek))
@@ -691,7 +715,6 @@ tablica["Заморожено в избытке (руб)"] = (
 ).round(2)
 
 
-# Классификация состояния остатка
 def opredelit_status(stroka):
     if stroka["Тип позиции"] == "✨ Новинка / Новый поставщик":
         return "✨ Ввод новинки"
@@ -723,7 +746,6 @@ otfiltrovannaya_tablica = (
     else tablica[tablica["Поставщик"] == vybrannyy_postavschik]
 )
 
-# Поиск по ключевому слову
 if poisk_tekst:
     otfiltrovannaya_tablica = otfiltrovannaya_tablica[
         otfiltrovannaya_tablica["Наименование"].str.contains(
@@ -734,19 +756,18 @@ if poisk_tekst:
         )
     ]
 
-# --- 9. БЛОК ВЫГРУЗКИ ШАБЛОНА ДЛЯ МЕНЕДЖЕРОВ ---
-with st.expander("📥 Скачать форму-шаблон для заполнения плана менеджерами", expanded=False):
+# --- 9. БЛОК ВЫГРУЗКИ СОКРАЩЕННОГО ШАБЛОНА ДЛЯ МЕНЕДЖЕРОВ ---
+with st.expander("📥 Скачать форму для заполнения плана продаж (6 колонок с формулой)", expanded=False):
     st.write(
-        "Файл оформлен с полями и границами, содержит полную матрицу склада и "
-        "строки-примеры для внесения новых виноделен и линеек."
+        "Файл содержит компактную матрицу: **Производитель, Наименование, Текущий остаток, Себестоимость, План в бутылках и План в рублях (автоформула)**."
     )
     dannie_shablona = sozdat_shablon_plana(
         tablica[tablica["Тип позиции"] == "Действующая матрица"]
     )
     st.download_button(
-        label="📥 Скачать Excel-шаблон плана продаж",
+        label="📥 Скачать форму плана продаж (Excel)",
         data=dannie_shablona,
-        file_name="Шаблон_плана_продаж_на_месяц.xlsx",
+        file_name="Форма_плана_продаж.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
@@ -816,7 +837,6 @@ with kolonka_sort:
     else:
         sortirovka_prozicit = None
 
-# Применение режима и сортировки
 if rezhim_otobrazheniya == "⚠️ Только дефицит и закупка":
     tablica_vyvoda = otfiltrovannaya_tablica[
         otfiltrovannaya_tablica["К заказу (бут)"] > 0
@@ -845,7 +865,6 @@ elif rezhim_otobrazheniya == "✨ Новинки и новые поставщи�
 else:
     tablica_vyvoda = otfiltrovannaya_tablica
 
-# Информационный бейдж
 kol_vo_novinok = (tablica["Тип позиции"] == "✨ Новинка / Новый поставщик").sum()
 st.info(
     f"Отображается строк: **{len(tablica_vyvoda)}** из {len(otfiltrovannaya_tablica)} | "
@@ -854,7 +873,6 @@ st.info(
     f"Загружено новинок: **{kol_vo_novinok}**"
 )
 
-# Список колонок для вывода
 stolbcy_dlya_pokaza = [
     "Поставщик",
     "Наименование",
