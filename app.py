@@ -1,5 +1,6 @@
 import io
 import math
+import os
 import re
 import pandas as pd
 import streamlit as st
@@ -11,275 +12,340 @@ st.set_page_config(
 )
 
 
-# --- 1. ПАРСЕР ВЕДОМОСТИ ДВИЖЕНИЯ ТОВАРОВ (НОВЫЙ ОТЧЕТ) ---
-def parse_movement_report(file_bytes):
-    df_raw = pd.read_excel(file_bytes, sheet_name=0)
+# --- 1. ПАРСЕР ВЕДОМОСТИ ДВИЖЕНИЯ ТОВАРОВ ---
+def razobrat_vedomost_dvizheniya(fayl_bayty):
+    tablica_syraya = pd.read_excel(fayl_bayty, sheet_name=0)
 
-    # Определение периода анализа из шапки (по умолчанию 371 день: 01.11.25 - 06.11.26)
-    days_in_period = 371
-    for r in range(1, 6):
-        val = str(df_raw.iloc[r, 2])
-        if "Период отчета" in val:
-            dates = re.findall(r"\d{2}\.\d{2}\.\d{4}", val)
-            if len(dates) == 2:
-                d1 = pd.to_datetime(dates[0], format="%d.%m.%Y")
-                d2 = pd.to_datetime(dates[1], format="%d.%m.%Y")
-                days_in_period = max(1, (d2 - d1).days)
+    # Определение периода отчета в днях из шапки
+    kolichestvo_dney = 371
+    for stroka_nomer in range(1, 6):
+        znachenie = str(tablica_syraya.iloc[stroka_nomer, 2])
+        if "Период отчета" in znachenie:
+            daty = re.findall(r"\d{2}\.\d{2}\.\d{4}", znachenie)
+            if len(daty) == 2:
+                data_nachala = pd.to_datetime(daty[0], format="%d.%m.%Y")
+                data_konca = pd.to_datetime(daty[1], format="%d.%m.%Y")
+                kolichestvo_dney = max(1, (data_konca - data_nachala).days)
 
-    items = []
-    current_supplier = "Не указан"
+    stroki_tovarov = []
+    tekuschiy_postavschik = "Не указан"
 
-    for idx in range(12, len(df_raw)):
-        col0 = str(df_raw.iloc[idx, 0]).strip()
-        col3 = df_raw.iloc[idx, 3]
+    for nomer in range(12, len(tablica_syraya)):
+        artikul_tekst = str(tablica_syraya.iloc[nomer, 0]).strip()
+        nomenklatura_tekst = tablica_syraya.iloc[nomer, 3]
 
-        if col0 in ["Склад Курьяново", "Итого", "nan"]:
+        if artikul_tekst in ["Склад Курьяново", "Итого", "nan"]:
             continue
 
-        # Если в колонке 3 пусто — это строка поставщика/производителя
-        if pd.isna(col3) or str(col3).strip() == "":
-            current_supplier = col0
+        # Строка-группа (поставщик / производитель)
+        if (
+            pd.isna(nomenklatura_tekst)
+            or str(nomenklatura_tekst).strip() == ""
+        ):
+            tekuschiy_postavschik = artikul_tekst
             continue
 
-        name = str(col3).strip()
+        naimenovanie = str(nomenklatura_tekst).strip()
 
-        # Кратность короба из наименования (например, ': 6')
-        pack_match = re.search(r":\s*(\d+)\s*,?", name)
-        pack_size = int(pack_match.group(1)) if pack_match else 6
+        # Определение кратности короба из названия (например, ': 6')
+        poisk_koroba = re.search(r":\s*(\d+)\s*,?", naimenovanie)
+        kratnost_koroba = int(poisk_koroba.group(1)) if poisk_koroba else 6
 
-        # Данные движения
-        qty_in = (
-            float(df_raw.iloc[idx, 9]) if pd.notna(df_raw.iloc[idx, 9]) else 0.0
-        )
-        qty_out = (
-            float(df_raw.iloc[idx, 11])
-            if pd.notna(df_raw.iloc[idx, 11])
+        # Показатели движения
+        prihod_kolichestvo = (
+            float(tablica_syraya.iloc[nomer, 9])
+            if pd.notna(tablica_syraya.iloc[nomer, 9])
             else 0.0
         )
-        stock_end = (
-            float(df_raw.iloc[idx, 14])
-            if pd.notna(df_raw.iloc[idx, 14])
+        rashod_kolichestvo = (
+            float(tablica_syraya.iloc[nomer, 11])
+            if pd.notna(tablica_syraya.iloc[nomer, 11])
             else 0.0
         )
-        val_end = (
-            float(df_raw.iloc[idx, 15])
-            if pd.notna(df_raw.iloc[idx, 15])
+        konechnyj_ostatok = (
+            float(tablica_syraya.iloc[nomer, 14])
+            if pd.notna(tablica_syraya.iloc[nomer, 14])
+            else 0.0
+        )
+        ocenka_konechnogo_ostatka = (
+            float(tablica_syraya.iloc[nomer, 15])
+            if pd.notna(tablica_syraya.iloc[nomer, 15])
             else 0.0
         )
 
-        cost_price = (val_end / stock_end) if stock_end > 0 else 0.0
-        adu = qty_out / days_in_period  # Среднедневной расход
+        sebestoimost_edinicy = (
+            (ocenka_konechnogo_ostatka / konechnyj_ostatok)
+            if konechnyj_ostatok > 0
+            else 0.0
+        )
+        srednesutochnyy_rashod = rashod_kolichestvo / kolichestvo_dney
 
-        items.append(
+        stroki_tovarov.append(
             {
-                "Поставщик": current_supplier,
-                "Артикул": col0,
-                "Наименование": name,
-                "Кратность (бут)": pack_size,
-                "Себестоимость (руб)": round(cost_price, 2),
-                "Приход (период)": int(qty_in),
-                "Расход (период)": int(qty_out),
-                "Остаток (бут)": int(stock_end),
-                "В пути (бут)": 0,  # Заполнится, если загружен 1-й отчет
-                "Дефицит (бут)": 0,  # Заполнится, если загружен 1-й отчет
-                "Расход в день (бут)": round(adu, 3),
+                "Поставщик": tekuschiy_postavschik,
+                "Артикул": artikul_tekst,
+                "Наименование": naimenovanie,
+                "Кратность (бут)": kratnost_koroba,
+                "Себестоимость (руб)": round(sebestoimost_edinicy, 2),
+                "Приход за период (бут)": int(prihod_kolichestvo),
+                "Расход за период (бут)": int(rashod_kolichestvo),
+                "Остаток на складе (бут)": int(konechnyj_ostatok),
+                "Товары в пути (бут)": 0,
+                "Потребность по заказам (бут)": 0,
+                "Среднесуточный расход (бут/день)": round(
+                    srednesutochnyy_rashod, 3
+                ),
             }
         )
 
-    return pd.DataFrame(items), days_in_period
+    return pd.DataFrame(stroki_tovarov), kolichestvo_dney
 
 
-# --- 2. ПАРСЕР ДОСТУПНОСТИ И ТРАНЗИТА (ПЕРВЫЙ ОТЧЕТ) ---
-def enrich_with_availability(df_main, file_bytes):
-    df_avail = pd.read_excel(file_bytes, sheet_name=0)
-    transit_map = {}
-    deficit_map = {}
+# --- 2. ПАРСЕР ДОСТУПНОСТИ И ТРАНЗИТА ---
+def obogatit_dannymi_dostupnosti(osnovnaya_tablica, fayl_bayty):
+    tablica_dostupnosti = pd.read_excel(fayl_bayty, sheet_name=0)
+    karta_puti = {}
+    karta_potrebnosti = {}
 
-    for idx in range(8, len(df_avail)):
-        col0 = str(df_avail.iloc[idx, 0]).strip()
-        col3 = df_avail.iloc[idx, 3]
+    for nomer in range(8, len(tablica_dostupnosti)):
+        artikul_tekst = str(tablica_dostupnosti.iloc[nomer, 0]).strip()
+        nomenklatura_tekst = tablica_dostupnosti.iloc[nomer, 3]
 
-        if pd.isna(col3) or str(col3).strip() == "" or col0 in ["nan", "Итого"]:
+        if (
+            pd.isna(nomenklatura_tekst)
+            or str(nomenklatura_tekst).strip() == ""
+            or artikul_tekst in ["nan", "Итого"]
+        ):
             continue
 
-        incoming = (
-            float(df_avail.iloc[idx, 11])
-            if pd.notna(df_avail.iloc[idx, 11])
+        ozhidaetsya_postuplenie = (
+            float(tablica_dostupnosti.iloc[nomer, 11])
+            if pd.notna(tablica_dostupnosti.iloc[nomer, 11])
             else 0.0
         )
-        to_fulfill = (
-            float(df_avail.iloc[idx, 15])
-            if pd.notna(df_avail.iloc[idx, 15])
+        k_obespecheniyu = (
+            float(tablica_dostupnosti.iloc[nomer, 15])
+            if pd.notna(tablica_dostupnosti.iloc[nomer, 15])
             else 0.0
         )
 
-        transit_map[col0] = int(incoming)
-        deficit_map[col0] = int(to_fulfill)
+        karta_puti[artikul_tekst] = int(ozhidaetsya_postuplenie)
+        karta_potrebnosti[artikul_tekst] = int(k_obespecheniyu)
 
-    df_main["В пути (бут)"] = (
-        df_main["Артикул"].map(transit_map).fillna(0).astype(int)
+    osnovnaya_tablica["Товары в пути (бут)"] = (
+        osnovnaya_tablica["Артикул"].map(karta_puti).fillna(0).astype(int)
     )
-    df_main["Дефицит (бут)"] = (
-        df_main["Артикул"].map(deficit_map).fillna(0).astype(int)
+    osnovnaya_tablica["Потребность по заказам (бут)"] = (
+        osnovnaya_tablica["Артикул"].map(karta_potrebnosti).fillna(0).astype(int)
     )
-    return df_main
+    return osnovnaya_tablica
 
 
-# --- 3. ИНТЕРФЕЙС И ЗАГРУЗКА ---
-st.title("🍷 Дашборд оборачиваемости и планирования закупок")
+# --- 3. ИНТЕРФЕЙС И БОКОВАЯ ПАНЕЛЬ ---
+st.title("🍷 Дашборд управления запасами и расчета потребности в закупках")
 st.caption(
-    "Склад Курьяново | Алгоритм расчета Reorder Point, страхового запаса и бюджета закупки"
+    "Склад Курьяново | Расчет точки перезаказа, страхового запаса и бюджета поставок"
 )
 
 with st.sidebar:
-    st.header("📂 Входные данные")
-    f_movement = st.file_uploader(
-        "1. Ведомость по товарам (Движение + Цены)", type=["xlsx"]
+    st.header("📂 Загрузка отчетов 1С")
+    zagruzhennaya_vedomost = st.file_uploader(
+        "1. Ведомость по товарам (движение и цены)", type=["xlsx"]
     )
-    f_avail = st.file_uploader(
-        "2. Отчет по доступности (Транзит + Заказы)", type=["xlsx"]
+    zagruzhennaya_dostupnost = st.file_uploader(
+        "2. Остатки и доступность (товары в пути и резервы)", type=["xlsx"]
     )
 
-    st.header("⚙️ Логистические нормативы")
-    lead_time = st.slider(
-        "Срок поставки (Lead Time, дни)", min_value=3, max_value=60, value=14
+    st.header("⚙️ Складские нормативы")
+    srok_dostavki = st.slider(
+        "Срок поставки (плечо доставки, дней)",
+        min_value=3,
+        max_value=60,
+        value=14,
     )
-    target_cover = st.slider(
-        "Целевой запас склада (дней)", min_value=14, max_value=90, value=45
+    celevoy_zapas = st.slider(
+        "Целевой запас склада (дней покрытия)",
+        min_value=14,
+        max_value=90,
+        value=45,
     )
-    safety_days = st.slider(
-        "Страховой запас (Safety Stock, дни)",
+    strahovoy_zapas_dni = st.slider(
+        "Страховой запас (дней покрытия)",
         min_value=0,
         max_value=30,
         value=10,
     )
 
-# Автозагрузка локальных файлов при запуске
+# Поиск файлов на сервере или в локальной папке data/
+fayl_dvizheniya_po_umolchaniyu = (
+    "Остатки и движение Курьяново 01.11.25-06.11.26.xlsx"
+    if os.path.exists("Остатки и движение Курьяново 01.11.25-06.11.26.xlsx")
+    else "data/Остатки и движение Курьяново 01.11.25-06.11.26.xlsx"
+)
+
+fayl_dostupnosti_po_umolchaniyu = (
+    "Остатки и доступность 06.11.26.xlsx"
+    if os.path.exists("Остатки и доступность 06.11.26.xlsx")
+    else "data/Остатки и доступность 06.11.26.xlsx"
+)
+
 try:
-    if f_movement is not None:
-        df, days_cnt = parse_movement_report(f_movement)
+    if zagruzhennaya_vedomost is not None:
+        tablica, dney_v_periode = razobrat_vedomost_dvizheniya(
+            zagruzhennaya_vedomost
+        )
     else:
-        df, days_cnt = parse_movement_report(
-            "Остатки и движение Курьяново 01.11.25-06.11.26.xlsx"
+        tablica, dney_v_periode = razobrat_vedomost_dvizheniya(
+            fayl_dvizheniya_po_umolchaniyu
         )
 
-    if f_avail is not None:
-        df = enrich_with_availability(df, f_avail)
-    else:
-        try:
-            df = enrich_with_availability(df, "Остатки и доступность 06.11.26.xlsx")
-        except Exception:
-            pass
-except Exception as e:
-    st.error(f"Ошибка загрузки данных: {e}")
+    if zagruzhennaya_dostupnost is not None:
+        tablica = obogatit_dannymi_dostupnosti(
+            tablica, zagruzhennaya_dostupnost
+        )
+    elif os.path.exists(fayl_dostupnosti_po_umolchaniyu):
+        tablica = obogatit_dannymi_dostupnosti(
+            tablica, fayl_dostupnosti_po_umolchaniyu
+        )
+except Exception as oshibka:
+    st.error(f"Ошибка при обработке файлов: {oshibka}")
     st.stop()
 
-# --- 4. МАТЕМАТИКА ОБОРАЧИВАЕМОСТИ И ЗАКУПКИ ---
-# Доступный запас = остаток + транзит
-df["Всего доступно (бут)"] = df["Остаток (бут)"] + df["В пути (бут)"]
+# --- 4. РАСЧЕТ ОБОРАЧИВАЕМОСТИ И ПОТРЕБНОСТИ В ЗАКУПКЕ ---
+# Фактически доступный объем: физический остаток + груз в пути
+tablica["Всего доступно (бут)"] = (
+    tablica["Остаток на складе (бут)"] + tablica["Товары в пути (бут)"]
+)
 
-# Дни покрытия запасом (если расход = 0, запас условно 999 дней)
-df["Дней покрытия"] = df.apply(
-    lambda r: round(r["Всего доступно (бут)"] / r["Расход в день (бут)"], 1)
-    if r["Расход в день (бут)"] > 0
+# Обеспеченность склада текущим остатком в днях
+tablica["Обеспеченность (дней)"] = tablica.apply(
+    lambda r: round(
+        r["Всего доступно (бут)"] / r["Среднесуточный расход (бут/день)"], 1
+    )
+    if r["Среднесуточный расход (бут/день)"] > 0
     else 999.0,
     axis=1,
 )
 
-# Точка заказа (Reorder Point): ROP = Спрос * (Lead Time + Safety Stock)
-df["Точка заказа ROP (бут)"] = (
-    df["Расход в день (бут)"] * (lead_time + safety_days)
+# Точка перезаказа = Среднесуточный расход * (Срок поставки + Страховой запас в днях)
+tablica["Точка перезаказа (бут)"] = (
+    tablica["Среднесуточный расход (бут/день)"]
+    * (srok_dostavki + strahovoy_zapas_dni)
 ).round(0)
 
-# Целевой нормативный запас: Спрос * (Lead Time + Target Cover)
-df["Целевой сток (бут)"] = (
-    df["Расход в день (бут)"] * (lead_time + target_cover)
+# Нормативный целевой запас = Среднесуточный расход * (Срок поставки + Целевой запас)
+tablica["Целевой запас (бут)"] = (
+    tablica["Среднесуточный расход (бут/день)"]
+    * (srok_dostavki + celevoy_zapas)
 ).round(0)
 
 
-# Расчет потребности в заказе с округлением до коробок
-def calculate_order(row):
-    need = (row["Целевой сток (бут)"] + row["Дефицит (бут)"]) - row[
-        "Всего доступно (бут)"
-    ]
-    if need <= 0:
+# Расчет объема закупки с округлением вверх до целых коробов
+def rasschitat_zakaz(stroka):
+    chistaya_potrebnost = (
+        stroka["Целевой запас (бут)"]
+        + stroka["Потребность по заказам (бут)"]
+    ) - stroka["Всего доступно (бут)"]
+
+    if chistaya_potrebnost <= 0:
         return 0
-    pack = row["Кратность (бут)"]
-    return int(math.ceil(need / pack) * pack)
+
+    kratnost = stroka["Кратность (бут)"]
+    return int(math.ceil(chistaya_potrebnost / kratnost) * kratnost)
 
 
-df["К заказу (бут)"] = df.apply(calculate_order, axis=1)
-df["К заказу (кор)"] = (df["К заказу (бут)"] / df["Кратность (бут)"]).astype(
-    int
-)
-df["Бюджет закупки (руб)"] = (
-    df["К заказу (бут)"] * df["Себестоимость (руб)"]
+tablica["К заказу (бут)"] = tablica.apply(rasschitat_zakaz, axis=1)
+tablica["К заказу (кор)"] = (
+    tablica["К заказу (бут)"] / tablica["Кратность (бут)"]
+).astype(int)
+tablica["Бюджет закупки (руб)"] = (
+    tablica["К заказу (бут)"] * tablica["Себестоимость (руб)"]
 ).round(2)
 
 
-# Классификация статуса запаса
-def evaluate_status(row):
-    if row["Дефицит (бут)"] > 0:
-        return "🚨 Дефицит по клиентам"
-    if row["Всего доступно (бут)"] <= row["Точка заказа ROP (бут)"]:
+# Классификация состояния товарного остатка
+def opredelit_status(stroka):
+    if stroka["Потребность по заказам (бут)"] > 0:
+        return "🚨 Срочный дефицит"
+    if stroka["Всего доступно (бут)"] <= stroka["Точка перезаказа (бут)"]:
         return "⚠️ Пора заказывать"
-    if row["Дней покрытия"] > (target_cover * 2):
-        return "📦 Избыток / Неликвид"
+    if stroka["Обеспеченность (дней)"] > (celevoy_zapas * 2):
+        return "📦 Избыточный запас"
     return "✅ В норме"
 
 
-df["Статус стока"] = df.apply(evaluate_status, axis=1)
+tablica["Статус запаса"] = tablica.apply(opredelit_status, axis=1)
 
-# Фильтр по поставщику
-suppliers_list = ["Все поставщики"] + sorted(df["Поставщик"].unique().tolist())
-selected_supp = st.sidebar.selectbox("Фильтр по производителю", suppliers_list)
-
-filtered = (
-    df if selected_supp == "Все поставщики" else df[df["Поставщик"] == selected_supp]
+# Фильтрация по производителю
+spisok_postavschikov = ["Все поставщики"] + sorted(
+    tablica["Поставщик"].unique().tolist()
+)
+vybrannyy_postavschik = st.sidebar.selectbox(
+    "Фильтр по производителю", spisok_postavschikov
 )
 
-# --- 5. МЕТРИКИ И KPI ДАШБОРДА ---
-c1, c2, c3, c4, c5 = st.columns(5)
-c1.metric(
-    "Складской сток (бут)",
-    f"{filtered['Остаток (бут)'].sum():,}".replace(",", " "),
+otfiltrovannaya_tablica = (
+    tablica
+    if vybrannyy_postavschik == "Все поставщики"
+    else tablica[tablica["Поставщик"] == vybrannyy_postavschik]
 )
-c2.metric("В пути (бут)", f"{filtered['В пути (бут)'].sum():,}".replace(",", " "))
-c3.metric(
-    "Годовой расход (бут)",
-    f"{filtered['Расход (период)'].sum():,}".replace(",", " "),
+
+# --- 5. КЛЮЧЕВЫЕ ПОКАЗАТЕЛИ СКЛАДА ---
+k1, k2, k3, k4, k5 = st.columns(5)
+k1.metric(
+    "Остаток на складе (бут)",
+    f"{otfiltrovannaya_tablica['Остаток на складе (бут)'].sum():,}".replace(
+        ",", " "
+    ),
 )
-c4.metric(
+k2.metric(
+    "Товары в пути (бут)",
+    f"{otfiltrovannaya_tablica['Товары в пути (бут)'].sum():,}".replace(
+        ",", " "
+    ),
+)
+k3.metric(
+    "Расход за период (бут)",
+    f"{otfiltrovannaya_tablica['Расход за период (бут)'].sum():,}".replace(
+        ",", " "
+    ),
+)
+k4.metric(
     "Потребность к заказу (бут)",
-    f"{filtered['К заказу (бут)'].sum():,}".replace(",", " "),
+    f"{otfiltrovannaya_tablica['К заказу (бут)'].sum():,}".replace(",", " "),
 )
-c5.metric(
-    "Бюджет заказа (руб)",
-    f"{filtered['Бюджет закупки (руб)'].sum():,.0f}".replace(",", " ") + " ₽",
+k5.metric(
+    "Бюджет закупки (руб)",
+    f"{otfiltrovannaya_tablica['Бюджет закупки (руб)'].sum():,.0f}".replace(
+        ",", " "
+    )
+    + " ₽",
 )
 
 st.markdown("---")
 
-# --- 6. ТАБЛИЦА ПЛАНА ЗАКУПОК И ЭКСПОРТ ---
-col_head, col_toggle = st.columns([3, 1])
-with col_head:
-    st.subheader("Сформированный план пополнения запасов")
-with col_toggle:
-    only_orders = st.toggle("Только позиции к заказу", value=False)
+# --- 6. ТАБЛИЦА ФОРМИРОВАНИЯ ЗАКУПОК И ЭКСПОРТ ---
+zagolovok_stolbec, pereklyuchatel_stolbec = st.columns([3, 1])
+with zagolovok_stolbec:
+    st.subheader("Сформированный план пополнения склада")
+with pereklyuchatel_stolbec:
+    tolko_k_zakazu = st.toggle("Только позиции к заказу", value=False)
 
-table_df = (
-    filtered[filtered["К заказу (бут)"] > 0] if only_orders else filtered
+tablica_dlya_vyvoda = (
+    otfiltrovannaya_tablica[otfiltrovannaya_tablica["К заказу (бут)"] > 0]
+    if tolko_k_zakazu
+    else otfiltrovannaya_tablica
 )
 
-cols_to_show = [
+vyvodimye_stolbcy = [
     "Поставщик",
     "Наименование",
-    "Статус стока",
+    "Статус запаса",
     "Себестоимость (руб)",
-    "Расход в день (бут)",
-    "Остаток (бут)",
-    "В пути (бут)",
-    "Дней покрытия",
+    "Среднесуточный расход (бут/день)",
+    "Остаток на складе (бут)",
+    "Товары в пути (бут)",
+    "Обеспеченность (дней)",
     "Кратность (бут)",
     "К заказу (бут)",
     "К заказу (кор)",
@@ -287,10 +353,10 @@ cols_to_show = [
 ]
 
 st.dataframe(
-    table_df[cols_to_show].style.format(
+    tablica_dlya_vyvoda[vyvodimye_stolbcy].style.format(
         {
             "Себестоимость (руб)": "{:.2f} ₽",
-            "Расход в день (бут)": "{:.2f}",
+            "Среднесуточный расход (бут/день)": "{:.2f}",
             "Бюджет закупки (руб)": "{:,.2f} ₽",
         }
     ),
@@ -298,16 +364,16 @@ st.dataframe(
     height=480,
 )
 
-# Выгрузка сформированного заказа в Excel
-output = io.BytesIO()
-with pd.ExcelWriter(output, engine="openpyxl") as writer:
-    table_df[cols_to_show].to_excel(
-        writer, index=False, sheet_name="План закупок"
+# Экспорт в Excel
+baffer_eksporta = io.BytesIO()
+with pd.ExcelWriter(baffer_eksporta, engine="openpyxl") as pisatel:
+    tablica_dlya_vyvoda[vyvodimye_stolbcy].to_excel(
+        pisatel, index=False, sheet_name="План закупок"
     )
 
 st.download_button(
     label="📥 Экспортировать план закупок в Excel",
-    data=output.getvalue(),
+    data=baffer_eksporta.getvalue(),
     file_name="План_закупок_Курьяново.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 )
