@@ -722,6 +722,16 @@ def opredelit_status(stroka):
 
 tablica["Статус запаса"] = tablica.apply(opredelit_status, axis=1)
 
+# ВЕСОВОЙ РАНГ СТАТУСОВ ДЛЯ ПРИОРИТЕТНОГО ВЫВОДА ДЕФИЦИТА НА ПЕРВЫЕ МЕСТА
+rang_prioritetov = {
+    "🚨 Срочный дефицит": 1,
+    "⚠️ Пора заказывать": 2,
+    "✨ Ввод новинки": 3,
+    "✅ В норме": 4,
+    "📦 Избыточный запас": 5,
+}
+tablica["Приоритет_ранг"] = tablica["Статус запаса"].map(rang_prioritetov).fillna(99)
+
 # --- МУЛЬТИСЕЛЕКТ ПО ПРОИЗВОДИТЕЛЯМ ---
 spisok_postavschikov = sorted(tablica["Поставщик"].unique().tolist())
 vybrannye_postavschiki = st.sidebar.multiselect(
@@ -837,7 +847,7 @@ with kolonka_sort:
 if rezhim_otobrazheniya == "⚠️ Только дефицит и закупка":
     tablica_vyvoda = otfiltrovannaya_tablica[
         otfiltrovannaya_tablica["К заказу (бут)"] > 0
-    ].sort_values(by="К заказу (бут)", ascending=False)
+    ].sort_values(by=["Приоритет_ранг", "К заказу (бут)"], ascending=[True, False])
 elif rezhim_otobrazheniya == "📦 Только избыточный запас":
     tablica_vyvoda = otfiltrovannaya_tablica[
         (otfiltrovannaya_tablica["Статус запаса"] == "📦 Избыточный запас")
@@ -858,9 +868,12 @@ elif rezhim_otobrazheniya == "📦 Только избыточный запас"
 elif rezhim_otobrazheniya == "✨ Новинки и новые поставщики":
     tablica_vyvoda = otfiltrovannaya_tablica[
         otfiltrovannaya_tablica["Тип позиции"] == "✨ Новинка / Новый поставщик"
-    ]
+    ].sort_values(by="К заказу (бут)", ascending=False)
 else:
-    tablica_vyvoda = otfiltrovannaya_tablica
+    # "Все позиции": Дефицитные и требующие заказа ВСЕГДА первыми, внутри них — по убыванию заказа
+    tablica_vyvoda = otfiltrovannaya_tablica.sort_values(
+        by=["Приоритет_ранг", "К заказу (бут)"], ascending=[True, False]
+    )
 
 kol_vo_novinok = (tablica["Тип позиции"] == "✨ Новинка / Новый поставщик").sum()
 st.info(
@@ -889,18 +902,39 @@ stolbcy_dlya_pokaza = [
     "Заморожено в избытке (руб)",
 ]
 
-st.dataframe(
-    tablica_vyvoda[stolbcy_dlya_pokaza].style.format(
+
+# Функция подсветки строк по статусам
+def podsvetit_stroki_po_statusu(stroka):
+    status = str(stroka.get("Статус запаса", ""))
+    if "Срочный дефицит" in status:
+        # Мягкий тревожный красный фон с темно-красным контрастным текстом
+        return ["background-color: #ffebee; color: #b71c1c; font-weight: 600;"] * len(stroka)
+    elif "Пора заказывать" in status:
+        # Мягкий желто-персиковый фон предупреждения
+        return ["background-color: #fffde7; color: #bf360c;"] * len(stroka)
+    return [""] * len(stroka)
+
+
+st_table = (
+    tablica_vyvoda[stolbcy_dlya_pokaza]
+    .style.apply(podsvetit_stroki_po_statusu, axis=1)
+    .format(
         {
             "Себестоимость (руб)": "{:.2f} ₽",
             "Расчетный спрос в день (бут)": "{:.2f}",
+            "Остаток на складе (бут)": "{:,.0f}",
+            "Товары в пути (бут)": "{:,.0f}",
+            "К заказу (бут)": "{:,.0f}",
+            "К заказу (кор)": "{:,.0f}",
             "К заказу (паллет)": "{:.2f}",
+            "Избыток (бут)": "{:,.0f}",
             "Бюджет закупки (руб)": "{:,.2f} ₽",
             "Заморожено в избытке (руб)": "{:,.2f} ₽",
         }
-    ),
-    use_container_width=True,
+    )
 )
+
+st.dataframe(st_table, use_container_width=True)
 
 # --- 12. ВЫГРУЗКА ИТОГОВОГО ПЛАНА ЗАКУПОК В EXCEL ---
 fayl_eksporta_bayty = sformirovat_krasivyy_excel(
