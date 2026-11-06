@@ -414,10 +414,17 @@ def sformirovat_krasivyy_excel(tablica_vyvoda, stolbcy_dlya_pokaza):
             start_color="DCFCE7", end_color="DCFCE7", fill_type="solid"
         )
 
+        # Динамический индекс колонки статуса
+        status_col_idx = (
+            stolbcy_dlya_pokaza.index("Статус запаса") + 1
+            if "Статус запаса" in stolbcy_dlya_pokaza
+            else 3
+        )
+
         for row_idx in range(2, len(tablica_vyvoda) + 2):
             ws.row_dimensions[row_idx].height = 20
             status_znachenie = str(
-                ws.cell(row=row_idx, column=3).value or ""
+                ws.cell(row=row_idx, column=status_col_idx).value or ""
             ).lower()
 
             for col_idx, nazvanie_kolonki in enumerate(
@@ -427,7 +434,7 @@ def sformirovat_krasivyy_excel(tablica_vyvoda, stolbcy_dlya_pokaza):
                 cell.border = granica_tonkaya
                 cell.font = Font(name="Calibri", size=10)
 
-                if col_idx == 3:
+                if col_idx == status_col_idx:
                     cell.alignment = Alignment(
                         horizontal="center", vertical="center"
                     )
@@ -504,7 +511,7 @@ def sformirovat_krasivyy_excel(tablica_vyvoda, stolbcy_dlya_pokaza):
             else:
                 ws.column_dimensions[bukva].width = max(min(dlina + 4, 30), 13)
 
-        ws.freeze_panes = "C2"
+        ws.freeze_panes = "D2"
 
     return baffer.getvalue()
 
@@ -870,7 +877,6 @@ elif rezhim_otobrazheniya == "✨ Новинки и новые поставщи�
         otfiltrovannaya_tablica["Тип позиции"] == "✨ Новинка / Новый поставщик"
     ].sort_values(by="К заказу (бут)", ascending=False)
 else:
-    # "Все позиции": Дефицитные и требующие заказа ВСЕГДА первыми, внутри них — по убыванию заказа
     tablica_vyvoda = otfiltrovannaya_tablica.sort_values(
         by=["Приоритет_ранг", "К заказу (бут)"], ascending=[True, False]
     )
@@ -883,20 +889,21 @@ st.info(
     f"Загружено новинок: **{kol_vo_novinok}**"
 )
 
+# ОБНОВЛЕННЫЙ ПОРЯДОК КОЛОНОК
 stolbcy_dlya_pokaza = [
     "Поставщик",
     "Наименование",
     "Статус запаса",
-    "Себестоимость (руб)",
+    "Остаток на складе (бут)",
     "План продаж на месяц (бут)",
     "Расчетный спрос в день (бут)",
-    "Остаток на складе (бут)",
     "Товары в пути (бут)",
     "Обеспеченность (дней)",
     "Кратность (бут)",
     "К заказу (бут)",
     "К заказу (кор)",
     "К заказу (паллет)",
+    "Себестоимость (руб)",
     "Бюджет закупки (руб)",
     "Избыток (бут)",
     "Заморожено в избытке (руб)",
@@ -907,10 +914,8 @@ stolbcy_dlya_pokaza = [
 def podsvetit_stroki_po_statusu(stroka):
     status = str(stroka.get("Статус запаса", ""))
     if "Срочный дефицит" in status:
-        # Мягкий тревожный красный фон с темно-красным контрастным текстом
         return ["background-color: #ffebee; color: #b71c1c; font-weight: 600;"] * len(stroka)
     elif "Пора заказывать" in status:
-        # Мягкий желто-персиковый фон предупреждения
         return ["background-color: #fffde7; color: #bf360c;"] * len(stroka)
     return [""] * len(stroka)
 
@@ -920,15 +925,15 @@ st_table = (
     .style.apply(podsvetit_stroki_po_statusu, axis=1)
     .format(
         {
-            "Себестоимость (руб)": "{:.2f} ₽",
-            "Расчетный спрос в день (бут)": "{:.2f}",
             "Остаток на складе (бут)": "{:,.0f}",
+            "Расчетный спрос в день (бут)": "{:.2f}",
             "Товары в пути (бут)": "{:,.0f}",
             "К заказу (бут)": "{:,.0f}",
             "К заказу (кор)": "{:,.0f}",
             "К заказу (паллет)": "{:.2f}",
-            "Избыток (бут)": "{:,.0f}",
+            "Себестоимость (руб)": "{:.2f} ₽",
             "Бюджет закупки (руб)": "{:,.2f} ₽",
+            "Избыток (бут)": "{:,.0f}",
             "Заморожено в избытке (руб)": "{:,.2f} ₽",
         }
     )
