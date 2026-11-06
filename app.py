@@ -47,7 +47,7 @@ def razobrat_vedomost_dvizheniya(fayl_bayty):
 
         naimenovanie = str(nomenklatura_tekst).strip()
 
-        # Определение кратности короба из названия (например, ': 6')
+        # Определение кратности короба из названия
         poisk_koroba = re.search(r":\s*(\d+)\s*,?", naimenovanie)
         kratnost_koroba = int(poisk_koroba.group(1)) if poisk_koroba else 6
 
@@ -141,10 +141,10 @@ def obogatit_dannymi_dostupnosti(osnovnaya_tablica, fayl_bayty):
     return osnovnaya_tablica
 
 
-# --- 3. ИНТЕРФЕЙС И БОКОВАЯ ПАНЕЛЬ ---
-st.title("🍷 Дашборд управления запасами и расчета потребности в закупках")
+# --- 3. ИНТЕРФЕЙС И НАСТРОЙКИ ---
+st.title("🍷 Дашборд управления запасами и анализа стока")
 st.caption(
-    "Склад Курьяново | Расчет точки перезаказа, страхового запаса и бюджета поставок"
+    "Склад Курьяново | Анализ дефицита, формирование закупок и выявление профицита"
 )
 
 with st.sidebar:
@@ -153,8 +153,11 @@ with st.sidebar:
         "1. Ведомость по товарам (движение и цены)", type=["xlsx"]
     )
     zagruzhennaya_dostupnost = st.file_uploader(
-        "2. Остатки и доступность (товары в пути и резервы)", type=["xlsx"]
+        "2. Остатки и доступность (транзит и резервы)", type=["xlsx"]
     )
+
+    st.header("🔍 Поиск и фильтрация")
+    poisk_tekst = st.text_input("Поиск по названию или артикулу", "")
 
     st.header("⚙️ Складские нормативы")
     srok_dostavki = st.slider(
@@ -176,7 +179,7 @@ with st.sidebar:
         value=10,
     )
 
-# Поиск файлов на сервере или в локальной папке data/
+# Автозагрузка локальных файлов по умолчанию
 fayl_dvizheniya_po_umolchaniyu = (
     "Остатки и движение Курьяново 01.11.25-06.11.26.xlsx"
     if os.path.exists("Остатки и движение Курьяново 01.11.25-06.11.26.xlsx")
@@ -208,16 +211,15 @@ try:
             tablica, fayl_dostupnosti_po_umolchaniyu
         )
 except Exception as oshibka:
-    st.error(f"Ошибка при обработке файлов: {oshibka}")
+    st.error(f"Ошибка загрузки данных: {oshibka}")
     st.stop()
 
-# --- 4. РАСЧЕТ ОБОРАЧИВАЕМОСТИ И ПОТРЕБНОСТИ В ЗАКУПКЕ ---
-# Фактически доступный объем: физический остаток + груз в пути
+# --- 4. РАСЧЕТ ОБОРАЧИВАЕМОСТИ, ДЕФИЦИТА И ПРОФИЦИТА ---
 tablica["Всего доступно (бут)"] = (
     tablica["Остаток на складе (бут)"] + tablica["Товары в пути (бут)"]
 )
 
-# Обеспеченность склада текущим остатком в днях
+# Обеспеченность склада (дней)
 tablica["Обеспеченность (дней)"] = tablica.apply(
     lambda r: round(
         r["Всего доступно (бут)"] / r["Среднесуточный расход (бут/день)"], 1
@@ -227,20 +229,19 @@ tablica["Обеспеченность (дней)"] = tablica.apply(
     axis=1,
 )
 
-# Точка перезаказа = Среднесуточный расход * (Срок поставки + Страховой запас в днях)
+# Точка перезаказа и нормативный целевой запас
 tablica["Точка перезаказа (бут)"] = (
     tablica["Среднесуточный расход (бут/день)"]
     * (srok_dostavki + strahovoy_zapas_dni)
 ).round(0)
 
-# Нормативный целевой запас = Среднесуточный расход * (Срок поставки + Целевой запас)
 tablica["Целевой запас (бут)"] = (
     tablica["Среднесуточный расход (бут/день)"]
     * (srok_dostavki + celevoy_zapas)
 ).round(0)
 
 
-# Расчет объема закупки с округлением вверх до целых коробов
+# Расчет потребности к заказу
 def rasschitat_zakaz(stroka):
     chistaya_potrebnost = (
         stroka["Целевой запас (бут)"]
@@ -263,20 +264,36 @@ tablica["Бюджет закупки (руб)"] = (
 ).round(2)
 
 
-# Классификация состояния товарного остатка
+# Расчет избыточного запаса (профицита)
+def rasschitat_izbytok(stroka):
+    # Избыток = всё что выше целевого норматива (если обеспеченность > нормы)
+    izlishek = stroka["Всего доступно (бут)"] - stroka["Целевой запас (бут)"]
+    return int(max(0, izlishek))
+
+
+tablica["Избыток (бут)"] = tablica.apply(rasschitat_izbytok, axis=1)
+tablica["Заморожено в избытке (руб)"] = (
+    tablica["Избыток (бут)"] * tablica["Себестоимость (руб)"]
+).round(2)
+
+
+# Классификация состояния остатка
 def opredelit_status(stroka):
     if stroka["Потребность по заказам (бут)"] > 0:
         return "🚨 Срочный дефицит"
     if stroka["Всего доступно (бут)"] <= stroka["Точка перезаказа (бут)"]:
         return "⚠️ Пора заказывать"
-    if stroka["Обеспеченность (дней)"] > (celevoy_zapas * 2):
+    if (
+        stroka["Обеспеченность (дней)"] > (celevoy_zapas * 1.5)
+        and stroka["Избыток (бут)"] > 0
+    ):
         return "📦 Избыточный запас"
     return "✅ В норме"
 
 
 tablica["Статус запаса"] = tablica.apply(opredelit_status, axis=1)
 
-# Фильтрация по производителю
+# Фильтр по поставщику
 spisok_postavschikov = ["Все поставщики"] + sorted(
     tablica["Поставщик"].unique().tolist()
 )
@@ -290,33 +307,45 @@ otfiltrovannaya_tablica = (
     else tablica[tablica["Поставщик"] == vybrannyy_postavschik]
 )
 
-# --- 5. КЛЮЧЕВЫЕ ПОКАЗАТЕЛИ СКЛАДА ---
-k1, k2, k3, k4, k5 = st.columns(5)
-k1.metric(
+# Поиск по ключевому слову
+if poisk_tekst:
+    otfiltrovannaya_tablica = otfiltrovannaya_tablica[
+        otfiltrovannaya_tablica["Наименование"].str.contains(
+            poisk_tekst, case=False, na=False
+        )
+        | otfiltrovannaya_tablica["Артикул"].str.contains(
+            poisk_tekst, case=False, na=False
+        )
+    ]
+
+# --- 5. КЛЮЧЕВЫЕ ПОКАЗАТЕЛИ (KPI) ---
+m1, m2, m3, m4, m5 = st.columns(5)
+m1.metric(
     "Остаток на складе (бут)",
     f"{otfiltrovannaya_tablica['Остаток на складе (бут)'].sum():,}".replace(
         ",", " "
     ),
 )
-k2.metric(
+m2.metric(
     "Товары в пути (бут)",
     f"{otfiltrovannaya_tablica['Товары в пути (бут)'].sum():,}".replace(
         ",", " "
     ),
 )
-k3.metric(
-    "Расход за период (бут)",
-    f"{otfiltrovannaya_tablica['Расход за период (бут)'].sum():,}".replace(
-        ",", " "
-    ),
-)
-k4.metric(
+m3.metric(
     "Потребность к заказу (бут)",
     f"{otfiltrovannaya_tablica['К заказу (бут)'].sum():,}".replace(",", " "),
 )
-k5.metric(
+m4.metric(
     "Бюджет закупки (руб)",
     f"{otfiltrovannaya_tablica['Бюджет закупки (руб)'].sum():,.0f}".replace(
+        ",", " "
+    )
+    + " ₽",
+)
+m5.metric(
+    "Заморожено в профиците (руб)",
+    f"{otfiltrovannaya_tablica['Заморожено в избытке (руб)'].sum():,.0f}".replace(
         ",", " "
     )
     + " ₽",
@@ -324,20 +353,67 @@ k5.metric(
 
 st.markdown("---")
 
-# --- 6. ТАБЛИЦА ФОРМИРОВАНИЯ ЗАКУПОК И ЭКСПОРТ ---
-zagolovok_stolbec, pereklyuchatel_stolbec = st.columns([3, 1])
-with zagolovok_stolbec:
-    st.subheader("Сформированный план пополнения склада")
-with pereklyuchatel_stolbec:
-    tolko_k_zakazu = st.toggle("Только позиции к заказу", value=False)
+# --- 6. ПЕРЕКЛЮЧАТЕЛЬ РЕЖИМА И СОРТИРОВКА ТАБЛИЦЫ ---
+kolonka_perekl, kolonka_sort = st.columns([2, 2])
 
-tablica_dlya_vyvoda = (
-    otfiltrovannaya_tablica[otfiltrovannaya_tablica["К заказу (бут)"] > 0]
-    if tolko_k_zakazu
-    else otfiltrovannaya_tablica
+with kolonka_perekl:
+    rezhim_otobrazheniya = st.radio(
+        "Режим просмотра выборки:",
+        options=[
+            "Все позиции",
+            "⚠️ Только дефицит и закупка",
+            "📦 Только избыточный запас (профицит)",
+        ],
+        horizontal=True,
+    )
+
+with kolonka_sort:
+    if rezhim_otobrazheniya == "📦 Только избыточный запас (профицит)":
+        sortirovka_prozicit = st.selectbox(
+            "Сортировка профицита:",
+            [
+                "По убыванию замороженных денег (руб)",
+                "По убыванию излишка (бут)",
+                "По убыванию обеспеченности (дней)",
+            ],
+        )
+    else:
+        sortirovka_prozicit = None
+
+# Применение выбранного режима и сортировки
+if rezhim_otobrazheniya == "⚠️ Только дефицит и закупка":
+    tablica_vyvoda = otfiltrovannaya_tablica[
+        otfiltrovannaya_tablica["К заказу (бут)"] > 0
+    ].sort_values(by="К заказу (бут)", ascending=False)
+elif rezhim_otobrazheniya == "📦 Только избыточный запас (профицит)":
+    tablica_vyvoda = otfiltrovannaya_tablica[
+        (otfiltrovannaya_tablica["Статус запаса"] == "📦 Избыточный запас")
+        | (otfiltrovannaya_tablica["Избыток (бут)"] > 0)
+    ]
+    if sortirovka_prozicit == "По убыванию замороженных денег (руб)":
+        tablica_vyvoda = tablica_vyvoda.sort_values(
+            by="Заморожено в избытке (руб)", ascending=False
+        )
+    elif sortirovka_prozicit == "По убыванию излишка (бут)":
+        tablica_vyvoda = tablica_vyvoda.sort_values(
+            by="Избыток (бут)", ascending=False
+        )
+    else:
+        tablica_vyvoda = tablica_vyvoda.sort_values(
+            by="Обеспеченность (дней)", ascending=False
+        )
+else:
+    tablica_vyvoda = otfiltrovannaya_tablica
+
+# Информационный бейдж о количестве строк
+st.info(
+    f"Отображается строк: **{len(tablica_vyvoda)}** из {len(otfiltrovannaya_tablica)} | "
+    f"Позиций к заказу: **{(otfiltrovannaya_tablica['К заказу (бут)'] > 0).sum()}** | "
+    f"Позиций в профиците: **{(otfiltrovannaya_tablica['Избыток (бут)'] > 0).sum()}**"
 )
 
-vyvodimye_stolbcy = [
+# Список колонок для вывода
+stolbcy_dlya_pokaza = [
     "Поставщик",
     "Наименование",
     "Статус запаса",
@@ -350,30 +426,33 @@ vyvodimye_stolbcy = [
     "К заказу (бут)",
     "К заказу (кор)",
     "Бюджет закупки (руб)",
+    "Избыток (бут)",
+    "Заморожено в избытке (руб)",
 ]
 
 st.dataframe(
-    tablica_dlya_vyvoda[vyvodimye_stolbcy].style.format(
+    tablica_vyvoda[stolbcy_dlya_pokaza].style.format(
         {
             "Себестоимость (руб)": "{:.2f} ₽",
             "Среднесуточный расход (бут/день)": "{:.2f}",
             "Бюджет закупки (руб)": "{:,.2f} ₽",
+            "Заморожено в избытке (руб)": "{:,.2f} ₽",
         }
     ),
     use_container_width=True,
-    height=480,
+    height=None,
 )
 
-# Экспорт в Excel
+# --- 7. ВЫГРУЗКА В EXCEL ---
 baffer_eksporta = io.BytesIO()
 with pd.ExcelWriter(baffer_eksporta, engine="openpyxl") as pisatel:
-    tablica_dlya_vyvoda[vyvodimye_stolbcy].to_excel(
-        pisatel, index=False, sheet_name="План закупок"
+    tablica_vyvoda[stolbcy_dlya_pokaza].to_excel(
+        pisatel, index=False, sheet_name="Анализ запасов"
     )
 
 st.download_button(
-    label="📥 Экспортировать план закупок в Excel",
+    label="📥 Экспортировать текущую таблицу в Excel",
     data=baffer_eksporta.getvalue(),
-    file_name="План_закупок_Курьяново.xlsx",
+    file_name="Анализ_запасов_Курьяново.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 )
