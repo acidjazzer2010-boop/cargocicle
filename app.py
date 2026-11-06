@@ -6,7 +6,7 @@ import pandas as pd
 import streamlit as st
 
 st.set_page_config(
-    page_title="Управление запасами и план закупок",
+    page_title="Управление запасами и квантование поставок",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -16,7 +16,7 @@ st.set_page_config(
 def razobrat_vedomost_dvizheniya(fayl_bayty):
     tablica_syraya = pd.read_excel(fayl_bayty, sheet_name=0)
 
-    # Определение периода отчета в днях из шапки файла
+    # Период отчета в днях из шапки
     kolichestvo_dney = 371
     for stroka_nomer in range(1, 6):
         znachenie = str(tablica_syraya.iloc[stroka_nomer, 2])
@@ -37,7 +37,6 @@ def razobrat_vedomost_dvizheniya(fayl_bayty):
         if artikul_tekst in ["Склад Курьяново", "Итого", "nan"]:
             continue
 
-        # Строка-группа (поставщик / производитель)
         if (
             pd.isna(nomenklatura_tekst)
             or str(nomenklatura_tekst).strip() == ""
@@ -47,11 +46,10 @@ def razobrat_vedomost_dvizheniya(fayl_bayty):
 
         naimenovanie = str(nomenklatura_tekst).strip()
 
-        # Определение кратности короба из наименования (например, ': 6')
+        # Кратность короба из названия (по умолчанию 6)
         poisk_koroba = re.search(r":\s*(\d+)\s*,?", naimenovanie)
         kratnost_koroba = int(poisk_koroba.group(1)) if poisk_koroba else 6
 
-        # Показатели движения
         prihod_kolichestvo = (
             float(tablica_syraya.iloc[nomer, 9])
             if pd.notna(tablica_syraya.iloc[nomer, 9])
@@ -141,10 +139,21 @@ def obogatit_dannymi_dostupnosti(osnovnaya_tablica, fayl_bayty):
     return osnovnaya_tablica
 
 
-# --- 3. ИНТЕРФЕЙС И НАСТРОЙКИ ---
-st.title("🍷 Дашборд управления запасами и анализа стока")
+# --- 3. ПАРСЕР ОТЧЕТА ПО КЛИЕНТАМ (ОПЦИОНАЛЬНО) ---
+def razobrat_otchet_klientov(fayl_bayty):
+    try:
+        tablica_klientov = pd.read_excel(fayl_bayty)
+        # Ищем колонки с клиентом, номенклатурой/артикулом и объемом
+        kolonki = [str(c).lower() for c in tablica_klientov.columns]
+        return tablica_klientov
+    except Exception:
+        return None
+
+
+# --- 4. ИНТЕРФЕЙС И НАСТРОЙКИ ---
+st.title("🍷 Дашборд управления запасами и квантования заказов")
 st.caption(
-    "Склад Курьяново | Анализ дефицита, формирование закупок и выявление профицита"
+    "Склад Курьяново | Расчет потребности с учетом кратности коробок и паллетных норм"
 )
 
 with st.sidebar:
@@ -155,9 +164,23 @@ with st.sidebar:
     zagruzhennaya_dostupnost = st.file_uploader(
         "2. Остатки и доступность (транзит и резервы)", type=["xlsx"]
     )
+    zagruzhennye_klienty = st.file_uploader(
+        "3. Отчет по клиентам / контрагентам (опционально)", type=["xlsx"]
+    )
 
     st.header("🔍 Поиск и фильтрация")
     poisk_tekst = st.text_input("Поиск по названию или артикулу", "")
+
+    st.header("📦 Кванты отгрузки поставщика")
+    emkost_palleta = st.number_input(
+        "Вместимость 1 паллета (бут)", min_value=60, max_value=1200, value=600, step=60
+    )
+    okruglyat_do_palleta = st.checkbox(
+        "Округлять заказ до целых паллет", value=False
+    )
+    minimalnyy_zakaz_pallet = st.number_input(
+        "Минимальный заказ (в паллетах)", min_value=1, max_value=33, value=1
+    )
 
     st.header("⚙️ Складские нормативы")
     srok_dostavki = st.slider(
@@ -217,7 +240,7 @@ except Exception as oshibka:
     st.error(f"Ошибка загрузки данных: {oshibka}")
     st.stop()
 
-# --- 4. РАСЧЕТ ОБОРАЧИВАЕМОСТИ, ДЕФИЦИТА И ПРОФИЦИТА ---
+# --- 5. РАСЧЕТ ОБОРАЧИВАЕМОСТИ И КВАНТОВАНИЯ ---
 tablica["Всего доступно (бут)"] = (
     tablica["Остаток на складе (бут)"] + tablica["Товары в пути (бут)"]
 )
@@ -244,8 +267,8 @@ tablica["Целевой запас (бут)"] = (
 ).round(0)
 
 
-# Расчет потребности к заказу
-def rasschitat_zakaz(stroka):
+# Расчет потребности с квантованием по коробам и паллетам
+def rasschitat_zakaz_kvanty(stroka):
     chistaya_potrebnost = (
         stroka["Целевой запас (бут)"]
         + stroka["Потребность по заказам (бут)"]
@@ -254,18 +277,31 @@ def rasschitat_zakaz(stroka):
     if chistaya_potrebnost <= 0:
         return 0
 
-    kratnost = stroka["Кратность (бут)"]
-    return int(math.ceil(chistaya_potrebnost / kratnost) * kratnost)
+    kratnost_korob = stroka["Кратность (бут)"]
+    zakaz_butylki = int(math.ceil(chistaya_potrebnost / kratnost_korob) * kratnost_korob)
+
+    # Если включено паллетное квантование
+    if okruglyat_do_palleta and zakaz_butylki > 0:
+        zakaz_butylki = int(math.ceil(zakaz_butylki / emkost_palleta) * emkost_palleta)
+    elif zakaz_butylki > 0 and minimalnyy_zakaz_pallet > 0:
+        # Контроль минимальной партии поставки
+        minimalnyy_obem = int(minimalnyy_zakaz_pallet * emkost_palleta)
+        if zakaz_butylki < minimalnyy_obem:
+            zakaz_butylki = minimalnyy_obem
+
+    return zakaz_butylki
 
 
-tablica["К заказу (бут)"] = tablica.apply(rasschitat_zakaz, axis=1)
+tablica["К заказу (бут)"] = tablica.apply(rasschitat_zakaz_kvanty, axis=1)
 tablica["К заказу (кор)"] = (
     tablica["К заказу (бут)"] / tablica["Кратность (бут)"]
 ).astype(int)
+tablica["К заказу (паллет)"] = (
+    tablica["К заказу (бут)"] / emkost_palleta
+).round(2)
 tablica["Бюджет закупки (руб)"] = (
     tablica["К заказу (бут)"] * tablica["Себестоимость (руб)"]
 ).round(2)
-
 
 # Расчет избыточного запаса (профицита)
 def rasschitat_izbytok(stroka):
@@ -320,7 +356,7 @@ if poisk_tekst:
         )
     ]
 
-# --- 5. КЛЮЧЕВЫЕ ПОКАЗАТЕЛИ (KPI) ---
+# --- 6. КЛЮЧЕВЫЕ ПОКАЗАТЕЛИ (KPI) ---
 m1, m2, m3, m4, m5 = st.columns(5)
 m1.metric(
     "Остаток на складе (бут)",
@@ -335,8 +371,11 @@ m2.metric(
     ),
 )
 m3.metric(
-    "Потребность к заказу (бут)",
-    f"{otfiltrovannaya_tablica['К заказу (бут)'].sum():,}".replace(",", " "),
+    "Потребность к заказу (бут / паллет)",
+    f"{otfiltrovannaya_tablica['К заказу (бут)'].sum():,} бут "
+    f"({otfiltrovannaya_tablica['К заказу (бут)'].sum() / emkost_palleta:.1f} пал)".replace(
+        ",", " "
+    ),
 )
 m4.metric(
     "Бюджет закупки (руб)",
@@ -355,7 +394,7 @@ m5.metric(
 
 st.markdown("---")
 
-# --- 6. ПЕРЕКЛЮЧАТЕЛЬ РЕЖИМА И СОРТИРОВКА ТАБЛИЦЫ ---
+# --- 7. ПЕРЕКЛЮЧАТЕЛЬ РЕЖИМА И СОРТИРОВКА ТАБЛИЦЫ ---
 kolonka_perekl, kolonka_sort = st.columns([2, 2])
 
 with kolonka_perekl:
@@ -407,7 +446,7 @@ elif rezhim_otobrazheniya == "📦 Только избыточный запас 
 else:
     tablica_vyvoda = otfiltrovannaya_tablica
 
-# Информационный бейдж о количестве строк
+# Информационный бейдж
 st.info(
     f"Отображается строк: **{len(tablica_vyvoda)}** из {len(otfiltrovannaya_tablica)} | "
     f"Позиций к заказу: **{(otfiltrovannaya_tablica['К заказу (бут)'] > 0).sum()}** | "
@@ -427,17 +466,18 @@ stolbcy_dlya_pokaza = [
     "Кратность (бут)",
     "К заказу (бут)",
     "К заказу (кор)",
+    "К заказу (паллет)",
     "Бюджет закупки (руб)",
     "Избыток (бут)",
     "Заморожено в избытке (руб)",
 ]
 
-# Вывод таблицы с авто-высотой
 st.dataframe(
     tablica_vyvoda[stolbcy_dlya_pokaza].style.format(
         {
             "Себестоимость (руб)": "{:.2f} ₽",
             "Среднесуточный расход (бут/день)": "{:.2f}",
+            "К заказу (паллет)": "{:.2f}",
             "Бюджет закупки (руб)": "{:,.2f} ₽",
             "Заморожено в избытке (руб)": "{:,.2f} ₽",
         }
@@ -445,7 +485,7 @@ st.dataframe(
     use_container_width=True,
 )
 
-# --- 7. ВЫГРУЗКА В EXCEL ---
+# --- 8. ВЫГРУЗКА В EXCEL ---
 baffer_eksporta = io.BytesIO()
 with pd.ExcelWriter(baffer_eksporta, engine="openpyxl") as pisatel:
     tablica_vyvoda[stolbcy_dlya_pokaza].to_excel(
