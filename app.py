@@ -6,7 +6,7 @@ import pandas as pd
 import streamlit as st
 
 st.set_page_config(
-    page_title="Управление запасами и квантование поставок",
+    page_title="Управление запасами и планирование продаж",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -16,7 +16,6 @@ st.set_page_config(
 def razobrat_vedomost_dvizheniya(fayl_bayty):
     tablica_syraya = pd.read_excel(fayl_bayty, sheet_name=0)
 
-    # Период отчета в днях из шапки
     kolichestvo_dney = 371
     for stroka_nomer in range(1, 6):
         znachenie = str(tablica_syraya.iloc[stroka_nomer, 2])
@@ -46,7 +45,6 @@ def razobrat_vedomost_dvizheniya(fayl_bayty):
 
         naimenovanie = str(nomenklatura_tekst).strip()
 
-        # Кратность короба из названия (по умолчанию 6)
         poisk_koroba = re.search(r":\s*(\d+)\s*,?", naimenovanie)
         kratnost_koroba = int(poisk_koroba.group(1)) if poisk_koroba else 6
 
@@ -93,6 +91,8 @@ def razobrat_vedomost_dvizheniya(fayl_bayty):
                 "Среднесуточный расход (бут/день)": round(
                     srednesutochnyy_rashod, 3
                 ),
+                "План продаж на месяц (бут)": 0,
+                "Тип позиции": "Действующая матрица",
             }
         )
 
@@ -139,21 +139,155 @@ def obogatit_dannymi_dostupnosti(osnovnaya_tablica, fayl_bayty):
     return osnovnaya_tablica
 
 
-# --- 3. ПАРСЕР ОТЧЕТА ПО КЛИЕНТАМ (ОПЦИОНАЛЬНО) ---
-def razobrat_otchet_klientov(fayl_bayty):
-    try:
-        tablica_klientov = pd.read_excel(fayl_bayty)
-        # Ищем колонки с клиентом, номенклатурой/артикулом и объемом
-        kolonki = [str(c).lower() for c in tablica_klientov.columns]
-        return tablica_klientov
-    except Exception:
-        return None
+# --- 3. ГЕНЕРАТОР ШАБЛОНА ПЛАНА ПРОДАЖ ДЛЯ МЕНЕДЖЕРОВ ---
+def sozdat_shablon_plana(df_baza):
+    shablon_spisok = []
+
+    # 1. Заполняем текущую матрицу
+    for _, r in df_baza.iterrows():
+        shablon_spisok.append(
+            {
+                "Поставщик / Производитель": r["Поставщик"],
+                "Артикул": r["Артикул"],
+                "Наименование продукции": r["Наименование"],
+                "Кратность короба (бут)": r["Кратность (бут)"],
+                "Ориентировочная себестоимость (руб)": r["Себестоимость (руб)"],
+                "План продаж на месяц (бут)": 0,
+                "Комментарий менеджера (клиенты/сеть)": "",
+            }
+        )
+
+    # 2. Добавляем примеры строк для новых поставщиков и новинок
+    shablon_spisok.append(
+        {
+            "Поставщик / Производитель": "НОВЫЙ ПОСТАВЩИК (ПРИМЕР)",
+            "Артикул": "НОВИНКА-001",
+            "Наименование продукции": "Новое вино сухое белое 0.75: 6",
+            "Кратность короба (бут)": 6,
+            "Ориентировочная себестоимость (руб)": 350.0,
+            "План продаж на месяц (бут)": 600,
+            "Комментарий менеджера (клиенты/сеть)": "Ввод под новую локальную сеть",
+        }
+    )
+
+    df_shablon = pd.DataFrame(shablon_spisok)
+    baffer = io.BytesIO()
+    with pd.ExcelWriter(baffer, engine="openpyxl") as pisatel:
+        df_shablon.to_excel(pisatel, index=False, sheet_name="План продаж")
+    return baffer.getvalue()
 
 
-# --- 4. ИНТЕРФЕЙС И НАСТРОЙКИ ---
-st.title("🍷 Дашборд управления запасами и квантования заказов")
+# --- 4. ОБЪЕДИНЕНИЕ БАЗЫ С ПЛАНОМ ПРОДАЖ МЕНЕДЖЕРОВ ---
+def primenit_plan_prodazh(osnovnaya_tablica, fayl_plana):
+    df_plan = pd.read_excel(fayl_plana)
+
+    # Поиск нужных колонок вне зависимости от мелких различий в регистре
+    kolonki = {str(c).strip().lower(): c for c in df_plan.columns}
+
+    k_postavschik = next(
+        (v for k, v in kolonki.items() if "поставщик" in k or "производ" in k),
+        None,
+    )
+    k_artikul = next((v for k, v in kolonki.items() if "артикул" in k), None)
+    k_naimenovanie = next(
+        (v for k, v in kolonki.items() if "наименов" in k or "продукт" in k),
+        None,
+    )
+    k_plan = next(
+        (v for k, v in kolonki.items() if "план" in k or "продаж" in k), None
+    )
+    k_sebest = next(
+        (v for k, v in kolonki.items() if "себестоим" in k or "цена" in k), None
+    )
+    k_kratnost = next((v for k, v in kolonki.items() if "кратн" in k), None)
+
+    if not k_plan:
+        return osnovnaya_tablica
+
+    plany_po_artikulam = {}
+    novye_pozicii = []
+    suschestvuyuschie_artikuly = set(osnovnaya_tablica["Артикул"].astype(str))
+
+    for _, stroka in df_plan.iterrows():
+        artikul_str = str(stroka[k_artikul]).strip() if k_artikul else ""
+        plan_obem = (
+            float(stroka[k_plan])
+            if pd.notna(stroka[k_plan]) and str(stroka[k_plan]).strip() != ""
+            else 0.0
+        )
+
+        if artikul_str in suschestvuyuschie_artikuly and artikul_str != "":
+            plany_po_artikulam[artikul_str] = int(plan_obem)
+        else:
+            # Это новая позиция или новый поставщик
+            naim = (
+                str(stroka[k_naimenovanie]).strip()
+                if k_naimenovanie and pd.notna(stroka[k_naimenovanie])
+                else "Новинка без названия"
+            )
+            if "ПРИМЕР" in naim.upper() and plan_obem == 0:
+                continue
+            if plan_obem > 0:
+                post = (
+                    str(stroka[k_postavschik]).strip()
+                    if k_postavschik and pd.notna(stroka[k_postavschik])
+                    else "Новый поставщик"
+                )
+                kratn = (
+                    int(stroka[k_kratnost])
+                    if k_kratnost and pd.notna(stroka[k_kratnost])
+                    else 6
+                )
+                seb = (
+                    float(stroka[k_sebest])
+                    if k_sebest and pd.notna(stroka[k_sebest])
+                    else 300.0
+                )
+
+                novye_pozicii.append(
+                    {
+                        "Поставщик": post,
+                        "Артикул": artikul_str
+                        if artikul_str and artikul_str != "nan"
+                        else f"НОВ-{len(novye_pozicii)+1}",
+                        "Наименование": naim,
+                        "Кратность (бут)": kratn,
+                        "Себестоимость (руб)": seb,
+                        "Приход за период (бут)": 0,
+                        "Расход за период (бут)": 0,
+                        "Остаток на складе (бут)": 0,
+                        "Товары в пути (бут)": 0,
+                        "Потребность по заказам (бут)": 0,
+                        "Среднесуточный расход (бут/день)": round(
+                            plan_obem / 30.0, 3
+                        ),
+                        "План продаж на месяц (бут)": int(plan_obem),
+                        "Тип позиции": "✨ Новинка / Новый поставщик",
+                    }
+                )
+
+    # Обновляем план в основной таблице
+    osnovnaya_tablica["План продаж на месяц (бут)"] = (
+        osnovnaya_tablica["Артикул"]
+        .map(plany_po_artikulam)
+        .fillna(0)
+        .astype(int)
+    )
+
+    # Если есть новинки — прикрепляем их
+    if novye_pozicii:
+        df_novinki = pd.DataFrame(novye_pozicii)
+        osnovnaya_tablica = pd.concat(
+            [osnovnaya_tablica, df_novinki], ignore_index=True
+        )
+
+    return osnovnaya_tablica
+
+
+# --- 5. ИНТЕРФЕЙС И НАСТРОЙКИ ---
+st.title("🍷 Дашборд управления запасами и планирования продаж")
 st.caption(
-    "Склад Курьяново | Расчет потребности с учетом кратности коробок и паллетных норм"
+    "Склад Курьяново | Учет планов менеджеров, новых клиентов и паллетных норм"
 )
 
 with st.sidebar:
@@ -164,8 +298,20 @@ with st.sidebar:
     zagruzhennaya_dostupnost = st.file_uploader(
         "2. Остатки и доступность (транзит и резервы)", type=["xlsx"]
     )
-    zagruzhennye_klienty = st.file_uploader(
-        "3. Отчет по клиентам / контрагентам (опционально)", type=["xlsx"]
+
+    st.header("📈 План продаж менеджеров")
+    zagruzhennyy_plan = st.file_uploader(
+        "3. Загрузить план продаж на месяц", type=["xlsx"]
+    )
+
+    metod_prognoza = st.radio(
+        "База для расчета среднесуточного расхода:",
+        options=[
+            "Только факт отгрузок 1С",
+            "План менеджеров (План / 30 дн)",
+            "Максимум (Факт vs План)",
+        ],
+        index=2,
     )
 
     st.header("🔍 Поиск и фильтрация")
@@ -202,7 +348,7 @@ with st.sidebar:
         value=10,
     )
 
-# Поиск файлов на сервере или в локальной папке data/
+# Автозагрузка исходных файлов
 fayl_dvizheniya_po_umolchaniyu = (
     "Остатки и движение Курьяново 01.11.25-06.11.26.xlsx"
     if os.path.exists("Остатки и движение Курьяново 01.11.25-06.11.26.xlsx")
@@ -225,7 +371,7 @@ try:
             fayl_dvizheniya_po_umolchaniyu
         )
     else:
-        st.warning("Загрузите файл движения товаров в боковом меню.")
+        st.warning("Загрузите ведомость движения товаров в боковом меню.")
         st.stop()
 
     if zagruzhennaya_dostupnost is not None:
@@ -236,11 +382,36 @@ try:
         tablica = obogatit_dannymi_dostupnosti(
             tablica, fayl_dostupnosti_po_umolchaniyu
         )
+
+    # Применение плана продаж, если он загружен
+    if zagruzhennyy_plan is not None:
+        tablica = primenit_plan_prodazh(tablica, zagruzhennyy_plan)
+
 except Exception as oshibka:
-    st.error(f"Ошибка загрузки данных: {oshibka}")
+    st.error(f"Ошибка при обработке файлов: {oshibka}")
     st.stop()
 
-# --- 5. РАСЧЕТ ОБОРАЧИВАЕМОСТИ И КВАНТОВАНИЯ ---
+# --- 6. ПЕРЕСЧЕТ СРЕДНЕСУТОЧНОГО СПРОСА С УЧЕТОМ ПЛАНА ---
+def opredelit_itogovyy_rashod(stroka):
+    fakt_sutki = stroka["Среднесуточный расход (бут/день)"]
+    plan_sutki = (
+        (stroka["План продаж на месяц (бут)"] / 30.0)
+        if stroka["План продаж на месяц (бут)"] > 0
+        else 0.0
+    )
+
+    if metod_prognoza == "План менеджеров (План / 30 дн)":
+        return plan_sutki if plan_sutki > 0 else fakt_sutki
+    elif metod_prognoza == "Максимум (Факт vs План)":
+        return max(fakt_sutki, plan_sutki)
+    return fakt_sutki
+
+
+tablica["Расчетный спрос в день (бут)"] = tablica.apply(
+    opredelit_itogovyy_rashod, axis=1
+).round(3)
+
+# --- 7. РАСЧЕТ ОБОРАЧИВАЕМОСТИ И ПОТРЕБНОСТИ В ЗАКУПКЕ ---
 tablica["Всего доступно (бут)"] = (
     tablica["Остаток на складе (бут)"] + tablica["Товары в пути (бут)"]
 )
@@ -248,26 +419,26 @@ tablica["Всего доступно (бут)"] = (
 # Обеспеченность склада (дней)
 tablica["Обеспеченность (дней)"] = tablica.apply(
     lambda r: round(
-        r["Всего доступно (бут)"] / r["Среднесуточный расход (бут/день)"], 1
+        r["Всего доступно (бут)"] / r["Расчетный спрос в день (бут)"], 1
     )
-    if r["Среднесуточный расход (бут/день)"] > 0
+    if r["Расчетный спрос в день (бут)"] > 0
     else 999.0,
     axis=1,
 )
 
 # Точка перезаказа и нормативный целевой запас
 tablica["Точка перезаказа (бут)"] = (
-    tablica["Среднесуточный расход (бут/день)"]
+    tablica["Расчетный спрос в день (бут)"]
     * (srok_dostavki + strahovoy_zapas_dni)
 ).round(0)
 
 tablica["Целевой запас (бут)"] = (
-    tablica["Среднесуточный расход (бут/день)"]
+    tablica["Расчетный спрос в день (бут)"]
     * (srok_dostavki + celevoy_zapas)
 ).round(0)
 
 
-# Расчет потребности с квантованием по коробам и паллетам
+# Расчет объема закупки с учетом квантов (короба, паллеты, мин. заказ)
 def rasschitat_zakaz_kvanty(stroka):
     chistaya_potrebnost = (
         stroka["Целевой запас (бут)"]
@@ -280,11 +451,9 @@ def rasschitat_zakaz_kvanty(stroka):
     kratnost_korob = stroka["Кратность (бут)"]
     zakaz_butylki = int(math.ceil(chistaya_potrebnost / kratnost_korob) * kratnost_korob)
 
-    # Если включено паллетное квантование
     if okruglyat_do_palleta and zakaz_butylki > 0:
         zakaz_butylki = int(math.ceil(zakaz_butylki / emkost_palleta) * emkost_palleta)
     elif zakaz_butylki > 0 and minimalnyy_zakaz_pallet > 0:
-        # Контроль минимальной партии поставки
         minimalnyy_obem = int(minimalnyy_zakaz_pallet * emkost_palleta)
         if zakaz_butylki < minimalnyy_obem:
             zakaz_butylki = minimalnyy_obem
@@ -303,6 +472,7 @@ tablica["Бюджет закупки (руб)"] = (
     tablica["К заказу (бут)"] * tablica["Себестоимость (руб)"]
 ).round(2)
 
+
 # Расчет избыточного запаса (профицита)
 def rasschitat_izbytok(stroka):
     izlishek = stroka["Всего доступно (бут)"] - stroka["Целевой запас (бут)"]
@@ -317,6 +487,8 @@ tablica["Заморожено в избытке (руб)"] = (
 
 # Классификация состояния остатка
 def opredelit_status(stroka):
+    if stroka["Тип позиции"] == "✨ Новинка / Новый поставщик":
+        return "✨ Ввод новинки"
     if stroka["Потребность по заказам (бут)"] > 0:
         return "🚨 Срочный дефицит"
     if stroka["Всего доступно (бут)"] <= stroka["Точка перезаказа (бут)"]:
@@ -356,7 +528,21 @@ if poisk_tekst:
         )
     ]
 
-# --- 6. КЛЮЧЕВЫЕ ПОКАЗАТЕЛИ (KPI) ---
+# --- 8. БЛОК ВЫГРУЗКИ ШАБЛОНА ДЛЯ МЕНЕДЖЕРОВ ---
+with st.expander("📥 Скачать форму-шаблон для заполнения плана менеджерами", expanded=False):
+    st.write(
+        "Файл содержит полную матрицу действующих позиций склада, а также строки-примеры для внесения "
+        "новых виноделен, линеек и прогнозов продаж под расширение клиентской базы."
+    )
+    dannie_shablona = sozdat_shablon_plana(tablica[tablica["Тип позиции"] == "Действующая матрица"])
+    st.download_button(
+        label="📥 Скачать Excel-шаблон плана продаж",
+        data=dannie_shablona,
+        file_name="Шаблон_плана_продаж_на_месяц.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+# --- 9. КЛЮЧЕВЫЕ ПОКАЗАТЕЛИ (KPI) ---
 m1, m2, m3, m4, m5 = st.columns(5)
 m1.metric(
     "Остаток на складе (бут)",
@@ -371,7 +557,7 @@ m2.metric(
     ),
 )
 m3.metric(
-    "Потребность к заказу (бут / паллет)",
+    "Потребность к заказу (бут / пал)",
     f"{otfiltrovannaya_tablica['К заказу (бут)'].sum():,} бут "
     f"({otfiltrovannaya_tablica['К заказу (бут)'].sum() / emkost_palleta:.1f} пал)".replace(
         ",", " "
@@ -394,7 +580,7 @@ m5.metric(
 
 st.markdown("---")
 
-# --- 7. ПЕРЕКЛЮЧАТЕЛЬ РЕЖИМА И СОРТИРОВКА ТАБЛИЦЫ ---
+# --- 10. ПЕРЕКЛЮЧАТЕЛЬ РЕЖИМА И СОРТИРОВКА ТАБЛИЦЫ ---
 kolonka_perekl, kolonka_sort = st.columns([2, 2])
 
 with kolonka_perekl:
@@ -404,6 +590,7 @@ with kolonka_perekl:
             "Все позиции",
             "⚠️ Только дефицит и закупка",
             "📦 Только избыточный запас (профицит)",
+            "✨ Новинки и новые поставщики",
         ],
         horizontal=True,
     )
@@ -443,14 +630,20 @@ elif rezhim_otobrazheniya == "📦 Только избыточный запас 
         tablica_vyvoda = tablica_vyvoda.sort_values(
             by="Обеспеченность (дней)", ascending=False
         )
+elif rezhim_otobrazheniya == "✨ Новинки и новые поставщики":
+    tablica_vyvoda = otfiltrovannaya_tablica[
+        otfiltrovannaya_tablica["Тип позиции"] == "✨ Новинка / Новый поставщик"
+    ]
 else:
     tablica_vyvoda = otfiltrovannaya_tablica
 
 # Информационный бейдж
+kol_vo_novinok = (tablica["Тип позиции"] == "✨ Новинка / Новый поставщик").sum()
 st.info(
     f"Отображается строк: **{len(tablica_vyvoda)}** из {len(otfiltrovannaya_tablica)} | "
     f"Позиций к заказу: **{(otfiltrovannaya_tablica['К заказу (бут)'] > 0).sum()}** | "
-    f"Позиций в профиците: **{(otfiltrovannaya_tablica['Избыток (бут)'] > 0).sum()}**"
+    f"Позиций в профиците: **{(otfiltrovannaya_tablica['Избыток (бут)'] > 0).sum()}** | "
+    f"Загружено новинок: **{kol_vo_novinok}**"
 )
 
 # Список колонок для вывода
@@ -459,7 +652,8 @@ stolbcy_dlya_pokaza = [
     "Наименование",
     "Статус запаса",
     "Себестоимость (руб)",
-    "Среднесуточный расход (бут/день)",
+    "План продаж на месяц (бут)",
+    "Расчетный спрос в день (бут)",
     "Остаток на складе (бут)",
     "Товары в пути (бут)",
     "Обеспеченность (дней)",
@@ -476,7 +670,7 @@ st.dataframe(
     tablica_vyvoda[stolbcy_dlya_pokaza].style.format(
         {
             "Себестоимость (руб)": "{:.2f} ₽",
-            "Среднесуточный расход (бут/день)": "{:.2f}",
+            "Расчетный спрос в день (бут)": "{:.2f}",
             "К заказу (паллет)": "{:.2f}",
             "Бюджет закупки (руб)": "{:,.2f} ₽",
             "Заморожено в избытке (руб)": "{:,.2f} ₽",
@@ -485,16 +679,16 @@ st.dataframe(
     use_container_width=True,
 )
 
-# --- 8. ВЫГРУЗКА В EXCEL ---
+# --- 11. ВЫГРУЗКА В EXCEL ---
 baffer_eksporta = io.BytesIO()
 with pd.ExcelWriter(baffer_eksporta, engine="openpyxl") as pisatel:
     tablica_vyvoda[stolbcy_dlya_pokaza].to_excel(
-        pisatel, index=False, sheet_name="Анализ запасов"
+        pisatel, index=False, sheet_name="План закупок"
     )
 
 st.download_button(
-    label="📥 Экспортировать текущую таблицу в Excel",
+    label="📥 Экспортировать план закупок в Excel",
     data=baffer_eksporta.getvalue(),
-    file_name="Анализ_запасов_Курьяново.xlsx",
+    file_name="План_закупок_с_учетом_плана_продаж.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 )
