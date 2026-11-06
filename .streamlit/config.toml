@@ -1,0 +1,11 @@
+[theme]
+base = "light"
+primaryColor = "#722F37"      # Винный оттенок
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F8F9FA"
+textColor = "#1F2937"
+
+[server]
+headless = true
+enableCORS = false
+enableXsrfProtection = false
